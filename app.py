@@ -103,10 +103,6 @@ def init_db():
     db.close()
 
 
-# ---------------------------------------------------------------------------
-# Pontuação dos palpites
-# ---------------------------------------------------------------------------
-
 def normalize_name(s):
     s = (s or "").lower().strip()
     s = unicodedata.normalize("NFD", s)
