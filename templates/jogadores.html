@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <div class="section-kicker">PARTICIPANTES</div>
+  <h2>Jogadores cadastrados</h2>
+  {% if players|length == 0 %}<p class="muted">Ainda não há jogadores.</p>
+  {% else %}
+    {% for p in players %}
+    <div class="row" style="margin-bottom:6px;">
+      <span class="player-chip" style="flex:1;"><span class="avatar">{{ p.name[:2]|upper }}</span>{{ p.name }}</span>
+      <form method="post" action="{{ url_for('remover_jogador', player_id=p.id) }}" onsubmit="return confirm('Remover {{ p.name }} e todos os palpites dele?');"><button class="btn danger" type="submit">Remover jogador</button></form>
+    </div>
+    {% endfor %}
+  {% endif %}
+</div>
+<div class="card">
+  <h2>Cadastrar jogador</h2>
+  <form method="post" action="{{ url_for('adicionar_jogador') }}">
+    <div class="row"><input type="text" name="name" placeholder="Nome do jogador" style="flex:1;min-width:180px;" required><button class="btn" type="submit">Cadastrar</button></div>
+  </form>
+  <p class="muted" style="margin:8px 0 0;">A pontuação antiga foi removida do formato. Todo participante começa a fase de liga com 0 pontos.</p>
+</div>
+<div class="card">
+  <h2>Manutenção</h2>
+  <p class="muted" style="margin:0 0 10px;">Apaga todas as rodadas, confrontos e palpites e restaura os 23 participantes da lista inicial.</p>
+  <form method="post" action="{{ url_for('reset_players') }}" onsubmit="return confirm('Isso vai apagar TODAS as rodadas, confrontos e palpites. Deseja continuar?');"><button class="btn danger" type="submit">Resetar torneio</button></form>
+</div>
+{% endblock %}

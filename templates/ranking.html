@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <div class="section-kicker">CHAMPIONS LEAGUE · FASE DE LIGA</div>
+  <h2>Classificação</h2>
+  <p class="muted" style="margin:0 0 12px;">
+    São 8 rodadas. Em cada rodada, dois participantes se enfrentam e quem fizer mais pontos nos palpites vence.
+    Vitória vale <b>3 pts</b>, empate <b>1 pt</b> e derrota <b>0 pt</b>.
+  </p>
+  <div class="progress"><span style="width:{{ (league_round_count / 8 * 100)|round(0) }}%"></span></div>
+  <p class="muted" style="margin:7px 0 12px;">{{ league_round_count }}/8 rodadas da fase de liga cadastradas.</p>
+
+  {% if ranking|length == 0 %}
+    <div class="empty">Nenhum jogador cadastrado ainda.</div>
+  {% else %}
+  <div class="table-scroll">
+  <table class="rank">
+    <thead>
+      <tr><th>Pos</th><th>Jogador</th><th>Pts</th><th>J</th><th>V</th><th>E</th><th>D</th></tr>
+    </thead>
+    <tbody>
+      {% for row in ranking %}
+      <tr class="{{ 'top1' if loop.index==1 else ('top2' if loop.index==2 else ('top3' if loop.index==3 else '')) }} {{ 'direct' if loop.index <= 4 else ('playoff' if loop.index <= 12 else '') }}">
+        <td><span class="pos">{{ loop.index }}º</span></td>
+        <td class="name-cell">{{ row.player.name }}</td>
+        <td class="pts">{{ row.points }}</td>
+        <td class="muted">{{ row.played }}</td>
+        <td class="muted">{{ row.wins }}</td>
+        <td class="muted">{{ row.draws }}</td>
+        <td class="muted">{{ row.losses }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="legend">
+    <span><i class="legend-direct"></i> 1º–4º: classificados diretamente às quartas</span>
+    <span><i class="legend-playoff"></i> 5º–12º: playoff</span>
+  </div>
+  {% endif %}
+</div>
+
+{% if playoff_series|length > 0 %}
+<div class="card">
+  <div class="section-kicker">PLAYOFF · 5º AO 12º</div>
+  <h2>Classificação para as quartas</h2>
+  <p class="muted" style="margin:0 0 12px;">Cada série tem 4 jogos. Avança quem vencer mais jogos. Se terminar 2×2, o melhor colocado na fase de liga leva a vaga.</p>
+  <div class="bracket-grid">
+    {% for s in playoff_series %}
+    <div class="series">
+      <div class="series-player {{ 'winner' if s.winner_id and s.winner_id == s.games[0].player1_id else '' }}">
+        <span>{{ s.p1_name }}</span><b>{{ s.p1_wins }}</b>
+      </div>
+      <div class="series-player {{ 'winner' if s.winner_id and s.winner_id == s.games[0].player2_id else '' }}">
+        <span>{{ s.p2_name }}</span><b>{{ s.p2_wins }}</b>
+      </div>
+      <div class="series-games">{{ s.completed_games }}/4 jogos encerrados</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% elif league_round_count == 8 %}
+<div class="card">
+  <div class="section-kicker">PLAYOFF</div>
+  <h2>Chaveamento definido</h2>
+  <p class="muted" style="margin:0;">Os 4 melhores estão nas quartas. Os jogadores do 5º ao 12º disputarão quatro jogos por série para definir as outras quatro vagas.</p>
+</div>
+{% endif %}
+
+{% if ranking|length > 0 %}
+<div class="card">
+  <h2>Compartilhar classificação</h2>
+  <p class="muted" style="margin:0 0 8px;">Texto pronto para colar no grupo do WhatsApp:</p>
+  <textarea id="rankingCopyText" readonly style="min-height:{{ (ranking|length * 22 + 40) }}px;">{{ copy_text }}</textarea>
+  <div class="row" style="margin-top:8px;">
+    <button class="btn" id="copyRankingBtn">Copiar texto</button>
+    <span class="muted" id="copyRankingMsg"></span>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Como funciona</h2>
+  <p class="muted rule-line"><b>Fase de liga:</b> 8 rodadas, confrontos sorteados sem repetir adversários.</p>
+  <p class="muted rule-line"><b>Resultado do confronto:</b> mais pontos de palpite na rodada vence; empate nos pontos = empate.</p>
+  <p class="muted rule-line"><b>Playoff:</b> 5º×12º, 6º×11º, 7º×10º e 8º×9º, em 4 jogos.</p>
+  <p class="muted rule-line"><b>Quartas:</b> os 4 primeiros vão direto e os 4 vencedores do playoff completam as 8 vagas.</p>
+  <p class="muted rule-line"><b>Pontuação antiga:</b> não é acumulada; o torneio começa do zero.</p>
+</div>
+
+<script>
+  var copyBtn = document.getElementById('copyRankingBtn');
+  if(copyBtn){
+    copyBtn.onclick = async function(){
+      var textEl = document.getElementById('rankingCopyText');
+      var msgEl = document.getElementById('copyRankingMsg');
+      try{
+        await navigator.clipboard.writeText(textEl.value);
+        msgEl.style.color = 'var(--green-ok)';
+        msgEl.textContent = 'Copiado! Já pode colar no WhatsApp.';
+      }catch(e){
+        textEl.focus(); textEl.select();
+        msgEl.style.color = '#f0906f';
+        msgEl.textContent = 'Use Ctrl+C para copiar o texto.';
+      }
+    };
+  }
+</script>
+{% endblock %}

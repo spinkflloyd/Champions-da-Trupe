@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <div class="section-kicker">CHAMPIONS LEAGUE · PALPITES</div>
+  <h2>Colar palpite</h2>
+  <p class="muted" style="margin:0 0 8px;">Cole a mensagem do WhatsApp exatamente como a pessoa mandou, já com os placares.</p>
+  <form method="post" action="{{ url_for('salvar_palpite') }}">
+    <p class="muted" style="margin:0 0 8px;">Quem mandou esse palpite?</p>
+    <select name="player_id" style="width:100%;margin-bottom:10px;">
+      <option value="">-- selecione --</option>
+      {% for p in players %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+    </select>
+    <div class="row" style="margin-bottom:10px;">
+      <input type="text" name="new_player_name" placeholder="Ou digite o nome de um jogador novo" style="flex:1;min-width:200px;">
+    </div>
+    <textarea name="pick_text" placeholder="Ex.:\n1ª RODADA\nLiverpool 2 x 1 Real Madrid\n..." required></textarea>
+    <div class="row" style="margin-top:8px;"><button class="btn" type="submit">Salvar palpite e verificar rodada</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Fase de liga · confrontos</h2>
+  <p class="muted" style="margin:0 0 12px;">O site sorteia os confrontos uma única vez. Nenhum participante enfrenta o mesmo adversário duas vezes nas 8 rodadas.</p>
+  {% for tr in tournament_rounds %}
+    <div class="tournament-round">
+      <div class="round-header">
+        <b>Rodada {{ tr.number }}</b>
+        {% if tr.football_round_id %}
+          <span class="round-tag {{ 'encerrada' if tr.football_round_id in rounds|map(attribute='id')|list and (rounds|selectattr('id','equalto',tr.football_round_id)|list|first).finished else 'aberta' }}">
+            {{ 'encerrada' if tr.football_round_id in rounds|map(attribute='id')|list and (rounds|selectattr('id','equalto',tr.football_round_id)|list|first).finished else 'em aberto' }}
+          </span>
+        {% else %}<span class="round-tag futura">aguardando</span>{% endif %}
+      </div>
+      <div class="matchup-list">
+        {% for m in matchup_map[tr.id] %}
+        <div class="matchup {{ 'draw' if m.result=='D' else ('p1win' if m.result=='P1' else ('p2win' if m.result=='P2' else '')) }}">
+          <span>{{ m.p1_name }}</span>
+          {% if m.result %}
+            <strong>{{ m.player1_score }} × {{ m.player2_score }}</strong>
+          {% else %}<strong>×</strong>{% endif %}
+          <span>{{ m.p2_name }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+{% if rounds|length > 0 %}
+<div class="card">
+  <h2>Rodadas de futebol cadastradas</h2>
+  {% for round in rounds %}
+    <div style="margin-bottom:18px;">
+      <div class="round-header">
+        <b>{{ round.name }}</b>
+        <span class="round-tag {{ 'encerrada' if round.finished else 'aberta' }}">{{ 'encerrada' if round.finished else 'aberta' }}</span>
+      </div>
+      {% if round.tournament %}
+      <p class="muted" style="margin:0 0 8px;">{{ round.tournament.phase|upper }} · confronto da rodada {{ round.tournament.number }}</p>
+      {% endif %}
+      {% for m in round.matches %}
+      <div class="match">
+        <span class="team home">{{ m.home }}</span>
+        {% if m.home_goals is not none and m.away_goals is not none %}<span class="result-tag">{{ m.home_goals }} x {{ m.away_goals }}</span>{% else %}<span class="vs">x</span>{% endif %}
+        <span class="team away">{{ m.away }}</span>
+      </div>
+      {% endfor %}
+      <div class="row">
+        <form method="post" action="{{ url_for('finalizar_rodada', round_id=round.id) }}" style="display:inline;">
+          <button class="btn" type="submit">{{ 'Buscar resultados novamente' if round.finished else 'Finalizar rodada' }}</button>
+        </form>
+        <button class="btn secondary toggle-manual-btn" data-target="manual-{{ round.id }}" type="button">Preencher/corrigir manualmente</button>
+        <form method="post" action="{{ url_for('excluir_rodada', round_id=round.id) }}" style="display:inline;" onsubmit="return confirm('Excluir esta rodada e todos os palpites feitos nela?');">
+          <button class="btn danger" type="submit">Excluir rodada</button>
+        </form>
+      </div>
+      <div id="manual-{{ round.id }}" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);">
+        <form method="post" action="{{ url_for('salvar_manual', round_id=round.id) }}">
+          {% for m in round.matches %}
+          <div class="match"><span class="team home">{{ m.home }}</span><span class="score-inputs"><input type="number" min="0" name="home_{{ m.id }}" value="{{ m.home_goals if m.home_goals is not none else '' }}" placeholder="-"><span class="vs">x</span><input type="number" min="0" name="away_{{ m.id }}" value="{{ m.away_goals if m.away_goals is not none else '' }}" placeholder="-"></span><span class="team away">{{ m.away }}</span></div>
+          {% endfor %}
+          <div class="row" style="margin-top:8px;"><button class="btn secondary" type="submit">Salvar correções</button></div>
+        </form>
+      </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);">
+        {% if round.picks_players|length == 0 %}<p class="muted" style="margin:0;">Nenhum palpite registrado.</p>
+        {% else %}
+          <p class="muted" style="margin:0 0 6px;">Palpites registrados:</p>
+          {% for p in round.picks_players %}
+          <div class="row" style="margin-bottom:4px;"><span style="flex:1;">{{ p.name }}</span><form method="post" action="{{ url_for('remover_palpite', round_id=round.id, player_id=p.id) }}" onsubmit="return confirm('Remover o palpite de {{ p.name }}?');"><button class="btn danger" type="submit">Remover palpite</button></form></div>
+          {% endfor %}
+        {% endif %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if playoff_rounds|length > 0 %}
+<div class="card">
+  <div class="section-kicker">PLAYOFF · MELHOR DE 4</div>
+  <h2>5º ao 12º → quartas</h2>
+  <p class="muted" style="margin:0 0 12px;">As mesmas quatro séries se repetem nas 4 rodadas. Quem vencer mais jogos avança.</p>
+  {% for s in playoff_series %}
+  <div class="series compact">
+    <div class="series-player"><span>{{ s.p1_name }}</span><b>{{ s.p1_wins }}</b></div>
+    <div class="series-player"><span>{{ s.p2_name }}</span><b>{{ s.p2_wins }}</b></div>
+  </div>
+  {% endfor %}
+  <p class="muted" style="margin:10px 0 0;">Se houver 2×2, o melhor colocado na fase de liga avança.</p>
+</div>
+{% endif %}
+
+<script>
+document.querySelectorAll('.toggle-manual-btn').forEach(function(btn){btn.onclick=function(){var el=document.getElementById(btn.getAttribute('data-target'));el.style.display=el.style.display==='none'?'block':'none';};});
+</script>
+{% endblock %}

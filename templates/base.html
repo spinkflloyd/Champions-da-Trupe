@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bolão — Champions League</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+  <header class="board">
+    <div class="board-inner">
+      <div>
+        <p class="title">BOLÃO</p>
+        <p class="subtitle" style="margin-top:2px;">Champions League · Fase de Liga</p>
+        <p class="subtitle">{{ rounds_count }} rodada(s) cadastrada(s){% if open_rounds %} · {{ open_rounds }} em aberto{% endif %}</p>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <a href="{{ url_for('ranking') }}" class="{{ 'active' if active=='ranking' else '' }}">Classificação</a>
+    <a href="{{ url_for('rodadas') }}" class="{{ 'active' if active=='rodadas' else '' }}">Rodadas</a>
+    <a href="{{ url_for('jogadores') }}" class="{{ 'active' if active=='jogadores' else '' }}">Jogadores</a>
+  </nav>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>
