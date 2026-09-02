@@ -183,11 +183,6 @@ def player_round_points(db, round_id, player_id):
             total += pts
     return total
 
-
-# ---------------------------------------------------------------------------
-# Torneio: fase de liga + playoff
-# ---------------------------------------------------------------------------
-
 def get_tournament_rounds(db, phase=None):
     sql = (
         "SELECT tr.*, r.name AS football_name FROM tournament_rounds tr "
@@ -394,11 +389,6 @@ def build_ranking_text(db):
         lines.append(f"{i}. {row['player']['name']}: {row['points']} pts")
     return "\n".join(lines)
 
-
-# ---------------------------------------------------------------------------
-# Rodadas de futebol / football-data.org
-# ---------------------------------------------------------------------------
-
 def find_or_create_round(db, parsed_name, parsed_matches):
     team_key = ",".join(sorted(f"{normalize_name(m['home'])}|{normalize_name(m['away'])}" for m in parsed_matches))
     round_row = None
@@ -508,11 +498,6 @@ def apply_results_to_round(db, round_id):
 def get_reference_round(db):
     rows = db.execute("SELECT * FROM rounds ORDER BY created_at DESC").fetchall()
     return next((r for r in rows if round_is_finished(db, r["id"])), None)
-
-
-# ---------------------------------------------------------------------------
-# Rotas
-# ---------------------------------------------------------------------------
 
 @app.context_processor
 def inject_header_stats():

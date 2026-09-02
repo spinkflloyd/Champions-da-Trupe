@@ -11,10 +11,21 @@
   <header class="board">
     <div class="board-inner">
       <div>
-        <p class="title">BOLÃO</p>
-        <p class="subtitle" style="margin-top:2px;">Champions League · Fase de Liga</p>
-        <p class="subtitle">{{ rounds_count }} rodada(s) cadastrada(s){% if open_rounds %} · {{ open_rounds }} em aberto{% endif %}</p>
-      </div>
+  <div class="title-container">
+    <img src="{{ url_for('static', filename='img/esquerda.png') }}" 
+         alt="" 
+         class="title-image">
+
+    <p class="title">BOLÃO</p>
+
+    <img src="{{ url_for('static', filename='img/direita.png') }}" 
+         alt="" 
+         class="title-image">
+  </div>
+
+  <p class="subtitle" style="margin-top:2px;">Champions League · Fase de Liga</p>
+  <p class="subtitle">{{ rounds_count }} rodada(s) cadastrada(s){% if open_rounds %} · {{ open_rounds }} em aberto{% endif %}</p>
+</div>
     </div>
   </header>
 

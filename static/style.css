@@ -173,7 +173,6 @@
 
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;}
 
-  /* Ranking */
   table.rank{width:100%;border-collapse:collapse;}
   table.rank th{
     text-align:left;font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:1px;
@@ -240,7 +239,6 @@
 
 form{margin:0;}
 
-/* Formato Champions League */
 .section-kicker{font-family:'Roboto Mono',monospace;font-size:10px;letter-spacing:1.6px;color:var(--chalk-dim);margin-bottom:5px;text-transform:uppercase;}
 .progress{height:7px;background:#101052;border-radius:99px;overflow:hidden;border:1px solid var(--line);}
 .progress span{display:block;height:100%;background:var(--floodlight);border-radius:99px;}
@@ -273,4 +271,17 @@ table.rank tr.playoff{background:rgba(255,201,77,.025);}
   table.rank th:nth-child(n+4),table.rank td:nth-child(n+4){padding-left:4px;padding-right:4px;}
   main{padding:12px;}
   .card{padding:14px;}
+}
+
+.title-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.title-image {
+  width: 45px;
+  height: 45px;
+  object-fit: contain;
 }
