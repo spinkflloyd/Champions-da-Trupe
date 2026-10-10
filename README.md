@@ -8,6 +8,8 @@
 
 Site desenvolvido em **Python com Flask** para gerenciar um bolão da **Champions League**, com sistema de palpites, classificação, atualização automática de resultados via API e fases de liga, playoffs e mata-matas.
 
+<div align="left">
+
 ## ✨ Funcionalidades
 
 - 💬 **Palpites direto do WhatsApp:** é só colar a mensagem do jogador (`Time 2 x 1 Time`) e o site monta a rodada e registra os palpites
