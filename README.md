@@ -21,6 +21,8 @@ Site desenvolvido em **Python com Flask** para gerenciar um bolão da **Champion
 - 👥 **Gestão de jogadores:** cadastro, remoção e ajuste de pontuação
 - ✍️ **Correção manual:** dá para preencher ou corrigir um resultado à mão quando precisar
 
+<div align="center">
+
 ## 🎯 Como funciona
 
 ### Pontuação dos palpites
@@ -30,6 +32,8 @@ Site desenvolvido em **Python com Flask** para gerenciar um bolão da **Champion
 | Placar cravado (exato) | **5 pts** |
 | Acertou só o resultado (vitória ou empate) | **3 pts** |
 | Errou o resultado | **0 pts** |
+
+<div align="left">
 
 ### 🏟️ Fase de liga
 
@@ -47,6 +51,8 @@ Site desenvolvido em **Python com Flask** para gerenciar um bolão da **Champion
 ### 🏅 Mata-matas
 
 - As **8 vagas das quartas** são formadas pelos 4 classificados diretos e pelos 4 vencedores do playoff.
+
+<div align="center">
 
 ## 🛠️ Tecnologias
 
