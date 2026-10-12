@@ -44,6 +44,12 @@ def close_db(exception=None):
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.execute("PRAGMA foreign_keys = ON")
+    # Os jogadores iniciais só são cadastrados quando o banco é criado pela
+    # primeira vez. Assim, "remover todos os jogadores" não os recria ao
+    # reiniciar o servidor.
+    is_new_db = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='players'"
+    ).fetchone() is None
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS players (
@@ -92,8 +98,7 @@ def init_db():
         );
         """
     )
-    count = db.execute("SELECT COUNT(*) FROM players").fetchone()[0]
-    if count == 0:
+    if is_new_db:
         for name, _ in SEED_PLAYERS:
             db.execute(
                 "INSERT INTO players (id, name, starting_points) VALUES (?, ?, 0)",
@@ -183,6 +188,7 @@ def player_round_points(db, round_id, player_id):
             total += pts
     return total
 
+
 def get_tournament_rounds(db, phase=None):
     sql = (
         "SELECT tr.*, r.name AS football_name FROM tournament_rounds tr "
@@ -205,14 +211,15 @@ def create_full_league_schedule(db):
     if len(players) < 2:
         return
 
-    # Para 23 participantes, o 24º espaço é um BYE.
     random.shuffle(players)
-    players.append(None)
+    # Com número ímpar de participantes, um deles descansa a cada rodada (BYE).
+    if len(players) % 2 == 1:
+        players.append(None)
     n = len(players)
     schedule = []
     current = players[:]
 
-    # Método do círculo: 23 participantes + BYE, 23 rodadas possíveis.
+    # Método do círculo: nenhum par se repete enquanto houver rodadas possíveis (n - 1).
     for _ in range(8):
         pairs = []
         for i in range(n // 2):
@@ -313,7 +320,7 @@ def attach_football_round(db, football_round_id):
             return tr["id"]
 
     # Só começa o playoff quando as 8 rodadas da fase de liga estiverem encerradas.
-    if all(tr["football_round_id"] and round_is_finished(db, tr["football_round_id"]) for tr in league):
+    if league and all(tr["football_round_id"] and round_is_finished(db, tr["football_round_id"]) for tr in league):
         create_playoff_schedule(db)
         for tr in get_tournament_rounds(db, "playoff"):
             if tr["football_round_id"] is None:
@@ -372,7 +379,7 @@ def playoff_series(db):
             elif p2_wins > p1_wins:
                 winner_id = base["player2_id"]
             else:
-                # Desempate não informado na regra recebida: favorece o melhor colocado na liga.
+                # Desempate: favorece o melhor colocado na liga (player1).
                 winner_id = base["player1_id"]
         result.append({
             "p1_name": base["p1_name"], "p2_name": base["p2_name"],
@@ -388,6 +395,7 @@ def build_ranking_text(db):
     for i, row in enumerate(ranking, 1):
         lines.append(f"{i}. {row['player']['name']}: {row['points']} pts")
     return "\n".join(lines)
+
 
 def find_or_create_round(db, parsed_name, parsed_matches):
     team_key = ",".join(sorted(f"{normalize_name(m['home'])}|{normalize_name(m['away'])}" for m in parsed_matches))
@@ -445,9 +453,8 @@ def save_picks(db, round_id, player_id, parsed_matches):
 def canonical_team(name):
     """Normaliza nomes de clubes da Champions para comparação.
 
-    Não existe lista de clubes brasileiros aqui: os nomes vêm dos jogos da
-    própria Champions League e são comparados de forma tolerante a acentos
-    e pontuação.
+    Os nomes vêm dos jogos da própria Champions League e são comparados
+    de forma tolerante a acentos e pontuação.
     """
     n = normalize_name(name)
     n = re.sub(r"[^a-z0-9 ]", "", n)
@@ -498,6 +505,7 @@ def apply_results_to_round(db, round_id):
 def get_reference_round(db):
     rows = db.execute("SELECT * FROM rounds ORDER BY created_at DESC").fetchall()
     return next((r for r in rows if round_is_finished(db, r["id"])), None)
+
 
 @app.context_processor
 def inject_header_stats():
@@ -680,6 +688,19 @@ def remover_jogador(player_id):
     db.execute("DELETE FROM players WHERE id=?", (player_id,))
     db.commit()
     return redirect(url_for("ranking"))
+
+
+@app.route("/jogadores/remover-todos", methods=["POST"])
+def remover_todos_jogadores():
+    db = get_db()
+    db.execute("DELETE FROM picks")
+    db.execute("DELETE FROM tournament_matchups")
+    # O sorteio da fase de liga depende dos jogadores cadastrados. Apagando as
+    # rodadas do torneio, o sorteio é refeito do zero quando houver novos jogadores.
+    db.execute("DELETE FROM tournament_rounds")
+    db.execute("DELETE FROM players")
+    db.commit()
+    return redirect(url_for("jogadores"))
 
 
 @app.route("/jogadores/reset", methods=["POST"])

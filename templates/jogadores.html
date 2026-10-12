@@ -3,7 +3,7 @@
 <div class="card">
   <div class="section-kicker">PARTICIPANTES</div>
   <h2>Jogadores cadastrados</h2>
-  {% if players|length == 0 %}<p class="muted">Ainda não há jogadores.</p>
+  {% if players|length == 0 %}<p class="muted">Ainda não há jogadores. Cadastre todos os participantes antes de abrir as abas Classificação e Rodadas, porque o sorteio da fase de liga é feito uma única vez com quem estiver cadastrado.</p>
   {% else %}
     {% for p in players %}
     <div class="row" style="margin-bottom:6px;">
@@ -23,6 +23,16 @@
 <div class="card">
   <h2>Manutenção</h2>
   <p class="muted" style="margin:0 0 10px;">Apaga todas as rodadas, confrontos e palpites e restaura os 23 participantes da lista inicial.</p>
-  <form method="post" action="{{ url_for('reset_players') }}" onsubmit="return confirm('Isso vai apagar TODAS as rodadas, confrontos e palpites. Deseja continuar?');"><button class="btn danger" type="submit">Resetar torneio</button></form>
+  <form method="post" action="{{ url_for('reset_players') }}" onsubmit="return confirm('Isso vai apagar TODAS as rodadas, confrontos e palpites. Deseja continuar?');">
+    <button class="btn danger" type="submit">Resetar torneio</button>
+  </form>
+
+  {% if players|length > 0 %}
+  <hr style="border:none;border-top:1px dashed var(--line);margin:16px 0;">
+  <p class="muted" style="margin:0 0 10px;">Remove todos os {{ players|length }} jogadores cadastrados, junto com os palpites e o sorteio dos confrontos. As rodadas de futebol e os placares continuam salvos.</p>
+  <form method="post" action="{{ url_for('remover_todos_jogadores') }}" onsubmit="return confirm('Isso vai remover TODOS os {{ players|length }} jogadores, seus palpites e o sorteio do torneio. Deseja continuar?');">
+    <button class="btn danger" type="submit">Remover todos os jogadores</button>
+  </form>
+  {% endif %}
 </div>
 {% endblock %}

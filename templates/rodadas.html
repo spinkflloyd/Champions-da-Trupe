@@ -22,6 +22,9 @@
 <div class="card">
   <h2>Fase de liga · confrontos</h2>
   <p class="muted" style="margin:0 0 12px;">O site sorteia os confrontos uma única vez. Nenhum participante enfrenta o mesmo adversário duas vezes nas 8 rodadas.</p>
+  {% if tournament_rounds|length == 0 %}
+    <div class="empty">Nenhum confronto sorteado ainda. O sorteio acontece quando houver pelo menos 2 jogadores cadastrados.</div>
+  {% endif %}
   {% for tr in tournament_rounds %}
     <div class="tournament-round">
       <div class="round-header">
