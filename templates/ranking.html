@@ -12,7 +12,7 @@
   <p class="muted" style="margin:7px 0 12px;">{{ league_round_count }}/8 rodadas da fase de liga cadastradas.</p>
 
   {% if ranking|length == 0 %}
-    <div class="empty">Nenhum jogador cadastrado ainda.<br>Vá em <a href="{{ url_for('jogadores') }}" style="color:var(--floodlight);">Jogadores</a> para cadastrar os participantes. O sorteio da fase de liga acontece automaticamente quando houver pelo menos 2.</div>
+    <div class="empty">Nenhum jogador cadastrado ainda.<br>Vá em <a href="{{ url_for('jogadores') }}" style="color:var(--floodlight);">Jogadores</a> para cadastrar os participantes. Depois, sorteie os confrontos de cada rodada na aba Rodadas.</div>
   {% else %}
   <div class="table-scroll">
   <table class="rank">
@@ -108,5 +108,3 @@
   }
 </script>
 {% endblock %}
-
-<!-- só pra trocar a descrição no git -->

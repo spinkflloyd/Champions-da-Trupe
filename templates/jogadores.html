@@ -3,7 +3,7 @@
 <div class="card">
   <div class="section-kicker">PARTICIPANTES</div>
   <h2>Jogadores cadastrados</h2>
-  {% if players|length == 0 %}<p class="muted">Ainda não há jogadores. Cadastre todos os participantes antes de abrir as abas Classificação e Rodadas, porque o sorteio da fase de liga é feito uma única vez com quem estiver cadastrado.</p>
+  {% if players|length == 0 %}<p class="muted">Ainda não há jogadores. Cadastre os participantes e depois sorteie os confrontos de cada rodada na aba Rodadas.</p>
   {% else %}
     {% for p in players %}
     <div class="row" style="margin-bottom:6px;">

@@ -283,45 +283,110 @@ def get_tournament_rounds(db, phase=None):
 
 
 def create_full_league_schedule(db):
-    """Cria as 8 rodadas e sorteia os confrontos sem repetir adversários."""
+    """Garante as 8 rodadas da fase de liga.
+
+    Os confrontos de cada rodada não são sorteados aqui: cada rodada é
+    sorteada separadamente, com o botão "Sortear confrontos".
+    """
     if get_tournament_rounds(db, "league"):
         return
+    now = datetime.utcnow().isoformat()
+    for number in range(1, 9):
+        db.execute(
+            "INSERT INTO tournament_rounds (id, number, phase, football_round_id, created_at) "
+            "VALUES (?, ?, 'league', NULL, ?) ON CONFLICT (phase, number) DO NOTHING",
+            (str(uuid.uuid4()), number, now),
+        )
+    db.commit()
+
+
+def _find_matching(players, forbidden, budget):
+    """Forma pares com todos os jogadores sem usar nenhum par proibido (busca com retrocesso)."""
+
+    def solve(remaining):
+        if not remaining:
+            return []
+        if budget[0] <= 0:
+            return None
+        budget[0] -= 1
+
+        def options(p):
+            return [q for q in remaining if q != p and frozenset((p, q)) not in forbidden]
+
+        # Começa pelo jogador com menos adversários possíveis.
+        a = min(remaining, key=lambda p: (len(options(p)), random.random()))
+        opts = options(a)
+        random.shuffle(opts)
+        for b in opts:
+            rest = [x for x in remaining if x != a and x != b]
+            result = solve(rest)
+            if result is not None:
+                return [(a, b)] + result
+        return None
+
+    return solve(list(players))
+
+
+def draw_league_round(db, tournament_round_id):
+    """Sorteia os confrontos de UMA rodada da fase de liga, sem repetir adversários.
+
+    Retorna (ok, codigo). Com número ímpar de jogadores, um descansa (BYE),
+    escolhido entre os que menos descansaram.
+    """
+    tr = db.execute(
+        "SELECT * FROM tournament_rounds WHERE id = ? AND phase = 'league'", (tournament_round_id,)
+    ).fetchone()
+    if not tr or tr["skipped"]:
+        return False, "indisponivel"
+    already = db.execute(
+        "SELECT COUNT(*) AS n FROM tournament_matchups WHERE tournament_round_id = ?", (tournament_round_id,)
+    ).fetchone()["n"]
+    if already and tr["football_round_id"]:
+        return False, "bloqueada"
 
     players = [r["id"] for r in db.execute("SELECT id FROM players ORDER BY name").fetchall()]
     if len(players) < 2:
-        return
+        return False, "sem_jogadores"
 
-    random.shuffle(players)
-    # Com número ímpar de participantes, um deles descansa a cada rodada (BYE).
-    if len(players) % 2 == 1:
-        players.append(None)
-    n = len(players)
-    schedule = []
-    current = players[:]
+    # Pares que já se enfrentaram nas OUTRAS rodadas da liga.
+    rows = db.execute(
+        "SELECT m.tournament_round_id AS rid, m.player1_id AS p1, m.player2_id AS p2 "
+        "FROM tournament_matchups m JOIN tournament_rounds r ON r.id = m.tournament_round_id "
+        "WHERE r.phase = 'league' AND r.skipped = 0 AND r.id <> ?",
+        (tournament_round_id,),
+    ).fetchall()
+    forbidden = set()
+    playing = {}
+    for r in rows:
+        forbidden.add(frozenset((r["p1"], r["p2"])))
+        playing.setdefault(r["rid"], set()).update((r["p1"], r["p2"]))
+    rests = {p: sum(1 for who in playing.values() if p not in who) for p in players}
 
-    # Método do círculo: nenhum par se repete enquanto houver rodadas possíveis (n - 1).
-    for _ in range(8):
-        pairs = []
-        for i in range(n // 2):
-            a, b = current[i], current[n - 1 - i]
-            if a is not None and b is not None:
-                pairs.append((a, b))
-        schedule.append(pairs)
-        # Mantém o primeiro elemento fixo e gira os demais.
-        current = [current[0], current[-1]] + current[1:-1]
+    budget = [15000]
+    pairs = None
+    if len(players) % 2 == 0:
+        while not pairs and budget[0] > 0:
+            pairs = _find_matching(players, forbidden, budget)
+            if pairs is None:
+                break
+    else:
+        for bye in sorted(players, key=lambda p: (rests[p], random.random())):
+            pairs = _find_matching([p for p in players if p != bye], forbidden, budget)
+            if pairs or budget[0] <= 0:
+                break
+    if not pairs:
+        return False, "esgotado"
 
-    for number, pairs in enumerate(schedule, 1):
-        tr_id = str(uuid.uuid4())
+    db.execute("DELETE FROM tournament_matchups WHERE tournament_round_id = ?", (tournament_round_id,))
+    for a, b in pairs:
+        if random.random() < 0.5:
+            a, b = b, a
         db.execute(
-            "INSERT INTO tournament_rounds (id, number, phase, football_round_id, created_at) VALUES (?, ?, 'league', NULL, ?)",
-            (tr_id, number, datetime.utcnow().isoformat()),
+            "INSERT INTO tournament_matchups (id, tournament_round_id, player1_id, player2_id) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), tournament_round_id, a, b),
         )
-        for p1, p2 in pairs:
-            db.execute(
-                "INSERT INTO tournament_matchups (id, tournament_round_id, player1_id, player2_id) VALUES (?, ?, ?, ?)",
-                (str(uuid.uuid4()), tr_id, p1, p2),
-            )
     db.commit()
+    return True, "ok"
 
 
 def league_standings(db):
@@ -403,6 +468,12 @@ def attach_football_round(db, football_round_id):
         if tr["football_round_id"] is None and not tr["skipped"]:
             db.execute("UPDATE tournament_rounds SET football_round_id = ? WHERE id = ?", (football_round_id, tr["id"]))
             db.commit()
+            # Se esqueceram de sortear esta rodada, sorteia agora.
+            has = db.execute(
+                "SELECT COUNT(*) AS n FROM tournament_matchups WHERE tournament_round_id = ?", (tr["id"],)
+            ).fetchone()["n"]
+            if not has:
+                draw_league_round(db, tr["id"])
             return tr["id"]
 
     # Só começa o playoff quando as 8 rodadas da fase de liga estiverem encerradas.
@@ -628,6 +699,17 @@ def ranking():
                            ref_round=ref)
 
 
+SORTEIO_MENSAGENS = {
+    "ok": (True, "Confrontos da rodada {n} sorteados."),
+    "sem_jogadores": (False, "Cadastre pelo menos 2 jogadores antes de sortear."),
+    "esgotado": (False, "Não foi possível sortear a rodada {n} sem repetir adversários. "
+                        "Com poucos jogadores isso é esperado; cadastre mais jogadores ou use "
+                        '"Sortear novamente" em uma rodada anterior.'),
+    "bloqueada": (False, "A rodada {n} já recebeu jogos e não pode ser sorteada de novo."),
+    "indisponivel": (False, "Esta rodada não pode ser sorteada."),
+}
+
+
 @app.route("/rodadas")
 def rodadas():
     db = get_db()
@@ -650,9 +732,16 @@ def rodadas():
         rounds.append({"id": r["id"], "name": r["name"], "matches": matches, "finished": finished,
                        "picks_players": picks_players, "round_scores": round_scores, "tournament": tr})
 
+    create_full_league_schedule(db)
     league_trs = get_tournament_rounds(db, "league")
     playoff_trs = get_tournament_rounds(db, "playoff")
     standings = league_standings(db)
+    sorteio_msg, sorteio_ok = None, False
+    code = request.args.get("sorteio")
+    n = request.args.get("rodada", type=int)
+    if code in SORTEIO_MENSAGENS:
+        sorteio_ok, text = SORTEIO_MENSAGENS[code]
+        sorteio_msg = text.format(n=n if n else "")
     matchup_map = {}
     for tr in league_trs + playoff_trs:
         matchup_map[tr["id"]] = db.execute(
@@ -662,7 +751,8 @@ def rodadas():
         ).fetchall()
     return render_template("rodadas.html", players=players, rounds=rounds, active="rodadas",
                            tournament_rounds=league_trs, playoff_rounds=playoff_trs,
-                           matchup_map=matchup_map, standings=standings, playoff_series=playoff_series(db))
+                           matchup_map=matchup_map, standings=standings, playoff_series=playoff_series(db),
+                           sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok)
 
 
 @app.route("/rodadas/palpite", methods=["POST"])
@@ -702,12 +792,15 @@ def salvar_palpite():
 def rodada_sem_jogos(tournament_round_id):
     """Marca uma rodada da fase de liga como "sem jogos": todos ganham 3 pontos."""
     db = get_db()
-    db.execute(
-        "UPDATE tournament_rounds SET skipped = 1 "
-        "WHERE id = ? AND phase = 'league' AND football_round_id IS NULL",
+    tr = db.execute(
+        "SELECT id FROM tournament_rounds WHERE id = ? AND phase = 'league' AND football_round_id IS NULL",
         (tournament_round_id,),
-    )
-    db.commit()
+    ).fetchone()
+    if tr:
+        db.execute("UPDATE tournament_rounds SET skipped = 1 WHERE id = ?", (tournament_round_id,))
+        # Uma rodada sem jogos não tem confrontos; os sorteados deixam de valer.
+        db.execute("DELETE FROM tournament_matchups WHERE tournament_round_id = ?", (tournament_round_id,))
+        db.commit()
     return redirect(url_for("rodadas"))
 
 
@@ -717,6 +810,14 @@ def desfazer_rodada_sem_jogos(tournament_round_id):
     db.execute("UPDATE tournament_rounds SET skipped = 0 WHERE id = ?", (tournament_round_id,))
     db.commit()
     return redirect(url_for("rodadas"))
+
+
+@app.route("/rodadas/torneio/<tournament_round_id>/sortear", methods=["POST"])
+def sortear_rodada(tournament_round_id):
+    db = get_db()
+    ok, code = draw_league_round(db, tournament_round_id)
+    tr = db.execute("SELECT number FROM tournament_rounds WHERE id = ?", (tournament_round_id,)).fetchone()
+    return redirect(url_for("rodadas", sorteio=code, rodada=tr["number"] if tr else 0))
 
 
 @app.route("/rodadas/<round_id>/finalizar", methods=["POST"])

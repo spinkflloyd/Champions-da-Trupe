@@ -21,11 +21,12 @@
 
 <div class="card">
   <h2>Fase de liga · confrontos</h2>
-  <p class="muted" style="margin:0 0 12px;">O site sorteia os confrontos uma única vez. Nenhum participante enfrenta o mesmo adversário duas vezes nas 8 rodadas.</p>
-  {% if tournament_rounds|length == 0 %}
-    <div class="empty">Nenhum confronto sorteado ainda. O sorteio acontece quando houver pelo menos 2 jogadores cadastrados.</div>
+  <p class="muted" style="margin:0 0 12px;">Sorteie os confrontos de cada rodada quando quiser. O site nunca repete adversários entre as rodadas. Jogadores cadastrados depois entram nos próximos sorteios; para incluí-los numa rodada já sorteada, use "Sortear novamente" (só vale enquanto a rodada não recebeu jogos).</p>
+  {% if sorteio_msg %}
+    <p style="margin:0 0 12px;color:{{ 'var(--green-ok, #5ad17a)' if sorteio_ok else '#f0906f' }};">{{ sorteio_msg }}</p>
   {% endif %}
   {% for tr in tournament_rounds %}
+    {% set drawn = matchup_map[tr.id]|length > 0 %}
     <div class="tournament-round">
       <div class="round-header">
         <b>Rodada {{ tr.number }}</b>
@@ -35,8 +36,10 @@
           <span class="round-tag {{ 'encerrada' if tr.football_round_id in rounds|map(attribute='id')|list and (rounds|selectattr('id','equalto',tr.football_round_id)|list|first).finished else 'aberta' }}">
             {{ 'encerrada' if tr.football_round_id in rounds|map(attribute='id')|list and (rounds|selectattr('id','equalto',tr.football_round_id)|list|first).finished else 'em aberto' }}
           </span>
-        {% else %}<span class="round-tag futura">aguardando</span>{% endif %}
+        {% elif drawn %}<span class="round-tag futura">sorteada</span>
+        {% else %}<span class="round-tag futura">aguardando sorteio</span>{% endif %}
       </div>
+      {% if drawn %}
       <div class="matchup-list">
         {% for m in matchup_map[tr.id] %}
         <div class="matchup {{ 'draw' if m.result=='D' else ('p1win' if m.result=='P1' else ('p2win' if m.result=='P2' else '')) }}">
@@ -48,15 +51,27 @@
         </div>
         {% endfor %}
       </div>
+      {% elif not tr.skipped %}
+        <p class="muted" style="margin:0;">Confrontos ainda não sorteados.</p>
+      {% endif %}
       {% if tr.skipped %}
         <p class="muted" style="margin:8px 0 0;">Rodada sem jogos: todos os jogadores ganharam 3 pontos.</p>
         <form method="post" action="{{ url_for('desfazer_rodada_sem_jogos', tournament_round_id=tr.id) }}" style="margin-top:8px;">
           <button class="btn secondary" type="submit">Desfazer "sem jogos"</button>
         </form>
-      {% elif not tr.football_round_id %}
-        <form method="post" action="{{ url_for('rodada_sem_jogos', tournament_round_id=tr.id) }}" style="margin-top:8px;" onsubmit="return confirm('Marcar a rodada {{ tr.number }} como sem jogos? Todos os jogadores ganham 3 pontos.');">
-          <button class="btn secondary" type="submit">Rodada sem jogos (3 pts para todos)</button>
-        </form>
+      {% else %}
+        <div class="row" style="margin-top:8px;">
+          {% if not (drawn and tr.football_round_id) %}
+          <form method="post" action="{{ url_for('sortear_rodada', tournament_round_id=tr.id) }}" {% if drawn %}onsubmit="return confirm('Sortear novamente a rodada {{ tr.number }}? Os confrontos atuais serão substituídos.');"{% endif %}>
+            <button class="btn" type="submit">{{ 'Sortear novamente' if drawn else 'Sortear confrontos' }}</button>
+          </form>
+          {% endif %}
+          {% if not tr.football_round_id %}
+          <form method="post" action="{{ url_for('rodada_sem_jogos', tournament_round_id=tr.id) }}" onsubmit="return confirm('Marcar a rodada {{ tr.number }} como sem jogos? Todos os jogadores ganham 3 pontos.');">
+            <button class="btn secondary" type="submit">Rodada sem jogos (3 pts para todos)</button>
+          </form>
+          {% endif %}
+        </div>
       {% endif %}
     </div>
   {% endfor %}
@@ -131,5 +146,3 @@
 document.querySelectorAll('.toggle-manual-btn').forEach(function(btn){btn.onclick=function(){var el=document.getElementById(btn.getAttribute('data-target'));el.style.display=el.style.display==='none'?'block':'none';};});
 </script>
 {% endblock %}
-
-<!-- só pra trocar a descrição no git -->
