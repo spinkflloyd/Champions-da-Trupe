@@ -764,3 +764,5 @@ if __name__ == "__main__":
     app.run(debug=True, port=5000)
 else:
     init_db()
+
+// só pra trocar a descrição no git
