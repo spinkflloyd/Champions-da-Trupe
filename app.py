@@ -765,4 +765,4 @@ if __name__ == "__main__":
 else:
     init_db()
 
-// só pra trocar a descrição no git
+# só pra trocar a descrição no git
