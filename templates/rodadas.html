@@ -29,7 +29,9 @@
     <div class="tournament-round">
       <div class="round-header">
         <b>Rodada {{ tr.number }}</b>
-        {% if tr.football_round_id %}
+        {% if tr.skipped %}
+          <span class="round-tag encerrada">sem jogos</span>
+        {% elif tr.football_round_id %}
           <span class="round-tag {{ 'encerrada' if tr.football_round_id in rounds|map(attribute='id')|list and (rounds|selectattr('id','equalto',tr.football_round_id)|list|first).finished else 'aberta' }}">
             {{ 'encerrada' if tr.football_round_id in rounds|map(attribute='id')|list and (rounds|selectattr('id','equalto',tr.football_round_id)|list|first).finished else 'em aberto' }}
           </span>
@@ -46,6 +48,16 @@
         </div>
         {% endfor %}
       </div>
+      {% if tr.skipped %}
+        <p class="muted" style="margin:8px 0 0;">Rodada sem jogos: todos os jogadores ganharam 3 pontos.</p>
+        <form method="post" action="{{ url_for('desfazer_rodada_sem_jogos', tournament_round_id=tr.id) }}" style="margin-top:8px;">
+          <button class="btn secondary" type="submit">Desfazer "sem jogos"</button>
+        </form>
+      {% elif not tr.football_round_id %}
+        <form method="post" action="{{ url_for('rodada_sem_jogos', tournament_round_id=tr.id) }}" style="margin-top:8px;" onsubmit="return confirm('Marcar a rodada {{ tr.number }} como sem jogos? Todos os jogadores ganham 3 pontos.');">
+          <button class="btn secondary" type="submit">Rodada sem jogos (3 pts para todos)</button>
+        </form>
+      {% endif %}
     </div>
   {% endfor %}
 </div>

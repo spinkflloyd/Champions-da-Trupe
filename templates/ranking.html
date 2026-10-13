@@ -8,7 +8,7 @@
     São 8 rodadas. Em cada rodada, dois participantes se enfrentam e quem fizer mais pontos nos palpites vence.
     Vitória vale <b>3 pts</b>, empate <b>1 pt</b> e derrota <b>0 pt</b>.
   </p>
-  <div class="progress"><span data-progress="{{ (league_round_count / 8 * 100)|round(0) }}"></span></div>
+  <div class="progress"><span style="width:{{ (league_round_count / 8 * 100)|round(0) }}%"></span></div>
   <p class="muted" style="margin:7px 0 12px;">{{ league_round_count }}/8 rodadas da fase de liga cadastradas.</p>
 
   {% if ranking|length == 0 %}
@@ -72,7 +72,7 @@
 <div class="card">
   <h2>Compartilhar classificação</h2>
   <p class="muted" style="margin:0 0 8px;">Texto pronto para colar no grupo do WhatsApp:</p>
-  <textarea id="rankingCopyText" data-row-count="{{ ranking|length }}" readonly>{{ copy_text }}</textarea>
+  <textarea id="rankingCopyText" readonly style="min-height:{{ (ranking|length * 22 + 40) }}px;">{{ copy_text }}</textarea>
   <div class="row" style="margin-top:8px;">
     <button class="btn" id="copyRankingBtn">Copiar texto</button>
     <span class="muted" id="copyRankingMsg"></span>

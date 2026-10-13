@@ -85,6 +85,7 @@ def init_db():
             phase TEXT NOT NULL,
             football_round_id TEXT REFERENCES rounds(id) ON DELETE CASCADE,
             created_at TEXT NOT NULL,
+            skipped INTEGER NOT NULL DEFAULT 0,
             UNIQUE(phase, number)
         );
         CREATE TABLE IF NOT EXISTS tournament_matchups (
@@ -98,6 +99,10 @@ def init_db():
         );
         """
     )
+    # Migração: bancos criados antes da função "Rodada sem jogos".
+    cols = [r[1] for r in db.execute("PRAGMA table_info(tournament_rounds)").fetchall()]
+    if "skipped" not in cols:
+        db.execute("ALTER TABLE tournament_rounds ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
     if is_new_db:
         for name, _ in SEED_PLAYERS:
             db.execute(
@@ -255,6 +260,12 @@ def league_standings(db):
         for p in players
     }
     for tr in get_tournament_rounds(db, "league"):
+        if tr["skipped"]:
+            # Rodada sem jogos: todos os jogadores ganham 3 pontos.
+            for row in data.values():
+                row["points"] += 3
+                row["played"] += 1
+            continue
         if not tr["football_round_id"] or not round_is_finished(db, tr["football_round_id"]):
             continue
         finalize_tournament_round(db, tr["id"])
@@ -314,13 +325,16 @@ def attach_football_round(db, football_round_id):
     create_full_league_schedule(db)
     league = get_tournament_rounds(db, "league")
     for tr in league:
-        if tr["football_round_id"] is None:
+        if tr["football_round_id"] is None and not tr["skipped"]:
             db.execute("UPDATE tournament_rounds SET football_round_id = ? WHERE id = ?", (football_round_id, tr["id"]))
             db.commit()
             return tr["id"]
 
     # Só começa o playoff quando as 8 rodadas da fase de liga estiverem encerradas.
-    if league and all(tr["football_round_id"] and round_is_finished(db, tr["football_round_id"]) for tr in league):
+    if league and all(
+        tr["skipped"] or (tr["football_round_id"] and round_is_finished(db, tr["football_round_id"]))
+        for tr in league
+    ):
         create_playoff_schedule(db)
         for tr in get_tournament_rounds(db, "playoff"):
             if tr["football_round_id"] is None:
@@ -511,8 +525,11 @@ def get_reference_round(db):
 def inject_header_stats():
     db = get_db()
     league = get_tournament_rounds(db, "league")
-    filled = sum(1 for r in league if r["football_round_id"])
-    finished = sum(1 for r in league if r["football_round_id"] and round_is_finished(db, r["football_round_id"]))
+    filled = sum(1 for r in league if r["football_round_id"] or r["skipped"])
+    finished = sum(
+        1 for r in league
+        if r["skipped"] or (r["football_round_id"] and round_is_finished(db, r["football_round_id"]))
+    )
     return {"rounds_count": filled, "open_rounds": filled - finished, "league_finished": finished >= 8}
 
 
@@ -529,7 +546,7 @@ def ranking():
     copy_text = build_ranking_text(db) if rows else ""
     playoff_rows = playoff_series(db)
     return render_template("ranking.html", ranking=rows, copy_text=copy_text, active="ranking",
-                           league_round_count=sum(1 for r in get_tournament_rounds(db, "league") if r["football_round_id"]),
+                           league_round_count=sum(1 for r in get_tournament_rounds(db, "league") if r["football_round_id"] or r["skipped"]),
                            playoff_pairs=rows[4:12] if len(rows) >= 12 else [], playoff_series=playoff_rows,
                            ref_round=ref)
 
@@ -602,6 +619,27 @@ def salvar_palpite():
         pass
     finalize_tournament_round(db, tr["id"])
     return redirect(url_for("ranking" if round_is_finished(db, round_row["id"]) else "rodadas"))
+
+
+@app.route("/rodadas/torneio/<tournament_round_id>/sem-jogos", methods=["POST"])
+def rodada_sem_jogos(tournament_round_id):
+    """Marca uma rodada da fase de liga como "sem jogos": todos ganham 3 pontos."""
+    db = get_db()
+    db.execute(
+        "UPDATE tournament_rounds SET skipped = 1 "
+        "WHERE id = ? AND phase = 'league' AND football_round_id IS NULL",
+        (tournament_round_id,),
+    )
+    db.commit()
+    return redirect(url_for("rodadas"))
+
+
+@app.route("/rodadas/torneio/<tournament_round_id>/desfazer-sem-jogos", methods=["POST"])
+def desfazer_rodada_sem_jogos(tournament_round_id):
+    db = get_db()
+    db.execute("UPDATE tournament_rounds SET skipped = 0 WHERE id = ?", (tournament_round_id,))
+    db.commit()
+    return redirect(url_for("rodadas"))
 
 
 @app.route("/rodadas/<round_id>/finalizar", methods=["POST"])
