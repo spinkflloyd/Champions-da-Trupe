@@ -11,7 +11,10 @@ from flask import Flask, g, redirect, render_template, request, url_for
 
 app = Flask(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "bolao.db")
+# Com DATABASE_URL definida (Neon/PostgreSQL), o app usa Postgres.
+# Sem ela, usa o arquivo SQLite local (útil para testar no computador).
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "bolao.db"))
 FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN", "")
 
 SEED_PLAYERS = [
@@ -26,11 +29,64 @@ COMPETITION_CODE = "CL"
 COMPETITION_NAME = "Champions League"
 
 
+class Row(dict):
+    """Linha de resultado que aceita row["coluna"] e row[0], como o sqlite3.Row."""
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+def _pg_row_factory(cursor):
+    names = [c.name for c in (cursor.description or [])]
+
+    def make_row(values):
+        return Row(zip(names, values))
+
+    return make_row
+
+
+class DB:
+    """Pequeno adaptador para o código funcionar igual em SQLite e PostgreSQL.
+
+    O código escreve as consultas com "?"; no Postgres elas viram "%s".
+    """
+
+    def __init__(self, conn, is_pg):
+        self.conn = conn
+        self.is_pg = is_pg
+
+    def execute(self, sql, args=()):
+        if self.is_pg:
+            sql = sql.replace("%", "%%").replace("?", "%s")
+        return self.conn.execute(sql, tuple(args))
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
+def connect_db():
+    if DATABASE_URL:
+        import psycopg
+
+        conn = psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory, connect_timeout=15)
+        return DB(conn, True)
+    folder = os.path.dirname(DB_PATH)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return DB(conn, False)
+
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = connect_db()
     return g.db
 
 
@@ -41,76 +97,95 @@ def close_db(exception=None):
         db.close()
 
 
+SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS players (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        starting_points INTEGER NOT NULL DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS rounds (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS matches (
+        id TEXT PRIMARY KEY,
+        round_id TEXT NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
+        home TEXT NOT NULL,
+        away TEXT NOT NULL,
+        home_goals INTEGER,
+        away_goals INTEGER,
+        position INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS picks (
+        round_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        match_id TEXT NOT NULL,
+        home_guess INTEGER NOT NULL,
+        away_guess INTEGER NOT NULL,
+        PRIMARY KEY (round_id, player_id, match_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS tournament_rounds (
+        id TEXT PRIMARY KEY,
+        number INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        football_round_id TEXT REFERENCES rounds(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(phase, number)
+    )""",
+    """CREATE TABLE IF NOT EXISTS tournament_matchups (
+        id TEXT PRIMARY KEY,
+        tournament_round_id TEXT NOT NULL REFERENCES tournament_rounds(id) ON DELETE CASCADE,
+        player1_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        player2_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        result TEXT,
+        player1_score INTEGER,
+        player2_score INTEGER
+    )""",
+]
+
+
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA foreign_keys = ON")
-    # Os jogadores iniciais só são cadastrados quando o banco é criado pela
-    # primeira vez. Assim, "remover todos os jogadores" não os recria ao
-    # reiniciar o servidor.
-    is_new_db = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='players'"
-    ).fetchone() is None
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS players (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            starting_points INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS rounds (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS matches (
-            id TEXT PRIMARY KEY,
-            round_id TEXT NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
-            home TEXT NOT NULL,
-            away TEXT NOT NULL,
-            home_goals INTEGER,
-            away_goals INTEGER,
-            position INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS picks (
-            round_id TEXT NOT NULL,
-            player_id TEXT NOT NULL,
-            match_id TEXT NOT NULL,
-            home_guess INTEGER NOT NULL,
-            away_guess INTEGER NOT NULL,
-            PRIMARY KEY (round_id, player_id, match_id)
-        );
-        CREATE TABLE IF NOT EXISTS tournament_rounds (
-            id TEXT PRIMARY KEY,
-            number INTEGER NOT NULL,
-            phase TEXT NOT NULL,
-            football_round_id TEXT REFERENCES rounds(id) ON DELETE CASCADE,
-            created_at TEXT NOT NULL,
-            skipped INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(phase, number)
-        );
-        CREATE TABLE IF NOT EXISTS tournament_matchups (
-            id TEXT PRIMARY KEY,
-            tournament_round_id TEXT NOT NULL REFERENCES tournament_rounds(id) ON DELETE CASCADE,
-            player1_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-            player2_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-            result TEXT,
-            player1_score INTEGER,
-            player2_score INTEGER
-        );
-        """
-    )
-    # Migração: bancos criados antes da função "Rodada sem jogos".
-    cols = [r[1] for r in db.execute("PRAGMA table_info(tournament_rounds)").fetchall()]
-    if "skipped" not in cols:
-        db.execute("ALTER TABLE tournament_rounds ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
-    if is_new_db:
-        for name, _ in SEED_PLAYERS:
-            db.execute(
-                "INSERT INTO players (id, name, starting_points) VALUES (?, ?, 0)",
-                (str(uuid.uuid4()), name),
-            )
-    db.commit()
-    db.close()
+    db = connect_db()
+    try:
+        if db.is_pg:
+            # Evita que dois processos criem as tabelas ao mesmo tempo.
+            db.execute("SELECT pg_advisory_lock(727274)")
+            exists = db.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_name = 'players'"
+            ).fetchone()
+        else:
+            exists = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='players'"
+            ).fetchone()
+        # Os jogadores iniciais só são cadastrados quando o banco é criado pela
+        # primeira vez. Assim, "remover todos os jogadores" não os recria ao
+        # reiniciar o servidor.
+        is_new_db = exists is None
+
+        for stmt in SCHEMA:
+            db.execute(stmt)
+
+        # Migração: bancos criados antes da função "Rodada sem jogos".
+        if db.is_pg:
+            db.execute("ALTER TABLE tournament_rounds ADD COLUMN IF NOT EXISTS skipped INTEGER NOT NULL DEFAULT 0")
+        else:
+            cols = [r["name"] for r in db.execute("PRAGMA table_info(tournament_rounds)").fetchall()]
+            if "skipped" not in cols:
+                db.execute("ALTER TABLE tournament_rounds ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+
+        if is_new_db:
+            for name, _ in SEED_PLAYERS:
+                db.execute(
+                    "INSERT INTO players (id, name, starting_points) VALUES (?, ?, 0) "
+                    "ON CONFLICT (name) DO NOTHING",
+                    (str(uuid.uuid4()), name),
+                )
+        db.commit()
+    finally:
+        db.close()  # também libera o lock do Postgres
 
 
 def normalize_name(s):
@@ -455,7 +530,9 @@ def save_picks(db, round_id, player_id, parsed_matches):
         for m in matches:
             if normalize_name(m["home"]) == normalize_name(pm["home"]) and normalize_name(m["away"]) == normalize_name(pm["away"]):
                 db.execute(
-                    "INSERT OR REPLACE INTO picks (round_id, player_id, match_id, home_guess, away_guess) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO picks (round_id, player_id, match_id, home_guess, away_guess) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT (round_id, player_id, match_id) DO UPDATE SET "
+                    "home_guess = excluded.home_guess, away_guess = excluded.away_guess",
                     (round_id, player_id, m["id"], pm["home_guess"], pm["away_guess"]),
                 )
                 matched += 1
@@ -764,5 +841,3 @@ if __name__ == "__main__":
     app.run(debug=True, port=5000)
 else:
     init_db()
-
-# só pra trocar a descrição no git
