@@ -115,7 +115,8 @@ SCHEMA = [
         away TEXT NOT NULL,
         home_goals INTEGER,
         away_goals INTEGER,
-        position INTEGER NOT NULL
+        position INTEGER NOT NULL,
+        manual INTEGER NOT NULL DEFAULT 0
     )""",
     """CREATE TABLE IF NOT EXISTS picks (
         round_id TEXT NOT NULL,
@@ -176,7 +177,11 @@ def init_db():
         # Migração: bancos criados antes da função "Rodada sem jogos".
         if db.is_pg:
             db.execute("ALTER TABLE tournament_rounds ADD COLUMN IF NOT EXISTS skipped INTEGER NOT NULL DEFAULT 0")
+            db.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS manual INTEGER NOT NULL DEFAULT 0")
         else:
+            mcols = [r["name"] for r in db.execute("PRAGMA table_info(matches)").fetchall()]
+            if "manual" not in mcols:
+                db.execute("ALTER TABLE matches ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
             cols = [r["name"] for r in db.execute("PRAGMA table_info(tournament_rounds)").fetchall()]
             if "skipped" not in cols:
                 db.execute("ALTER TABLE tournament_rounds ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
@@ -699,6 +704,8 @@ def apply_results_to_round(db, round_id):
     results = fetch_results_from_football_data([{"home": m["home"], "away": m["away"]} for m in matches])
     updated = 0
     for m, r in zip(matches, results):
+        if m["manual"]:
+            continue  # resultado preenchido/corrigido à mão: a busca automática não mexe
         if r["found"]:
             db.execute("UPDATE matches SET home_goals=?, away_goals=? WHERE id=?", (r["home_goals"], r["away_goals"], m["id"]))
             updated += 1
@@ -782,6 +789,19 @@ def rodadas():
     league_trs = get_tournament_rounds(db, "league")
     playoff_trs = get_tournament_rounds(db, "playoff")
     standings = league_standings(db)
+    # Resumo logo após salvar resultados à mão.
+    resultados = None
+    rr = request.args.get("resultados")
+    if rr:
+        rd = next((x for x in rounds if x["id"] == rr), None)
+        if rd:
+            resultados = {
+                "round": rd["name"], "with_result": rd["with_result"], "total": rd["total_matches"],
+                "missing": [f"{m['home']} x {m['away']}" for m in rd["matches"]
+                            if m["home_goals"] is None or m["away_goals"] is None],
+            }
+    not_found_games = request.args.getlist("nj")[:10]
+
     sorteio_msg, sorteio_ok = None, False
     code = request.args.get("sorteio")
     n = request.args.get("rodada", type=int)
@@ -798,7 +818,8 @@ def rodadas():
     return render_template("rodadas.html", players=players, rounds=rounds, active="rodadas",
                            tournament_rounds=league_trs, playoff_rounds=playoff_trs,
                            matchup_map=matchup_map, standings=standings, playoff_series=playoff_series(db),
-                           sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok, saved=saved)
+                           sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok, saved=saved,
+                           resultados=resultados, not_found_games=not_found_games)
 
 
 @app.route("/rodadas/palpite", methods=["POST"])
@@ -826,12 +847,19 @@ def salvar_palpite():
     if tr is None:
         return redirect(url_for("rodadas"))
     save_picks(db, round_row["id"], player_id, parsed_matches)
+    round_matches = db.execute("SELECT home, away FROM matches WHERE round_id=?", (round_row["id"],)).fetchall()
+    known = {(normalize_name(m["home"]), normalize_name(m["away"])) for m in round_matches}
+    not_found = [
+        f"{pm['home']} x {pm['away']}"[:80]
+        for pm in parsed_matches
+        if (normalize_name(pm["home"]), normalize_name(pm["away"])) not in known
+    ][:10]
     try:
         apply_results_to_round(db, round_row["id"])
     except Exception:
         pass
     finalize_tournament_round(db, tr["id"])
-    return redirect(url_for("rodadas", salvo_jogador=player_id, salvo_rodada=round_row["id"],
+    return redirect(url_for("rodadas", salvo_jogador=player_id, salvo_rodada=round_row["id"], nj=not_found,
                             _anchor=f"round-{round_row['id']}"))
 
 
@@ -887,14 +915,60 @@ def salvar_manual(round_id):
     for m in matches:
         h = request.form.get(f"home_{m['id']}", "").strip()
         a = request.form.get(f"away_{m['id']}", "").strip()
-        hg = int(h) if h.isdigit() else None
-        ag = int(a) if a.isdigit() else None
-        db.execute("UPDATE matches SET home_goals=?, away_goals=? WHERE id=?", (hg, ag, m["id"]))
+        hg = int(h) if h.isascii() and h.isdigit() else None
+        ag = int(a) if a.isascii() and a.isdigit() else None
+        if hg is not None and ag is not None:
+            # Tudo o que é salvo aqui fica "manual": a busca automática não desfaz.
+            manual = 1
+        else:
+            hg = ag = None
+            manual = 0  # campo vazio: volta a aceitar o resultado da busca automática
+        db.execute(
+            "UPDATE matches SET home_goals=?, away_goals=?, manual=? WHERE id=?",
+            (hg, ag, manual, m["id"]),
+        )
     db.commit()
     tr = db.execute("SELECT * FROM tournament_rounds WHERE football_round_id=?", (round_id,)).fetchone()
     if tr:
         finalize_tournament_round(db, tr["id"])
-    return redirect(url_for("ranking" if round_is_finished(db, round_id) else "rodadas"))
+    return redirect(url_for("rodadas", resultados=round_id, _anchor=f"round-{round_id}"))
+
+
+@app.route("/rodadas/<round_id>/jogos/adicionar", methods=["POST"])
+def adicionar_jogo(round_id):
+    """Acrescenta à rodada um jogo que ficou de fora do primeiro palpite colado."""
+    db = get_db()
+    home = request.form.get("home", "").strip()
+    away = request.form.get("away", "").strip()
+    if home and away and db.execute("SELECT 1 FROM rounds WHERE id=?", (round_id,)).fetchone():
+        existing = db.execute("SELECT home, away, position FROM matches WHERE round_id=?", (round_id,)).fetchall()
+        dup = any(
+            normalize_name(m["home"]) == normalize_name(home) and normalize_name(m["away"]) == normalize_name(away)
+            for m in existing
+        )
+        if not dup:
+            pos = max([m["position"] for m in existing], default=-1) + 1
+            db.execute(
+                "INSERT INTO matches (id, round_id, home, away, home_goals, away_goals, position) "
+                "VALUES (?, ?, ?, ?, NULL, NULL, ?)",
+                (str(uuid.uuid4()), round_id, home, away, pos),
+            )
+            db.commit()
+    return redirect(url_for("rodadas", _anchor=f"round-{round_id}"))
+
+
+@app.route("/rodadas/<round_id>/jogos/<match_id>/remover", methods=["POST"])
+def remover_jogo(round_id, match_id):
+    """Remove um jogo da rodada (e os palpites feitos nele), por exemplo um time digitado errado."""
+    db = get_db()
+    if db.execute("SELECT 1 FROM matches WHERE id=? AND round_id=?", (match_id, round_id)).fetchone():
+        db.execute("DELETE FROM picks WHERE match_id=?", (match_id,))
+        db.execute("DELETE FROM matches WHERE id=?", (match_id,))
+        db.commit()
+        tr = db.execute("SELECT * FROM tournament_rounds WHERE football_round_id=?", (round_id,)).fetchone()
+        if tr:
+            finalize_tournament_round(db, tr["id"])
+    return redirect(url_for("rodadas", _anchor=f"round-{round_id}"))
 
 
 @app.route("/rodadas/<round_id>/excluir", methods=["POST"])

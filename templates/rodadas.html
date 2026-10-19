@@ -19,6 +19,28 @@
 </div>
 {% endif %}
 
+{% if not_found_games %}
+<div class="card">
+  <div class="section-kicker">JOGOS NÃO ENCONTRADOS NA RODADA</div>
+  <p style="margin:0 0 6px;color:#f0906f;">Estes jogos do palpite não existem na rodada e não foram contados:</p>
+  {% for g in not_found_games %}<p style="margin:0;">• {{ g }}</p>{% endfor %}
+  <p class="muted" style="margin:8px 0 0;">Se faltar jogo na rodada, abra "Preencher/corrigir manualmente", use "Adicionar jogo" e cole o palpite de novo. Se for erro de digitação do nome do time, corrija o texto e cole outra vez.</p>
+</div>
+{% endif %}
+
+{% if resultados %}
+<div class="card">
+  <div class="section-kicker">RESULTADOS SALVOS</div>
+  <p style="margin:0;"><b>{{ resultados.round }}</b> · {{ resultados.with_result }} de {{ resultados.total }} jogos com resultado.</p>
+  {% if resultados.missing %}
+    <p style="margin:6px 0 0;color:#f0906f;">Ainda sem resultado:</p>
+    {% for g in resultados.missing %}<p style="margin:0;">• {{ g }}</p>{% endfor %}
+  {% else %}
+    <p style="margin:6px 0 0;color:var(--green-ok, #5ad17a);">Todos os jogos têm resultado e os pontos já foram recalculados.</p>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
   <div class="section-kicker">CHAMPIONS LEAGUE · PALPITES</div>
   <h2>Colar palpite</h2>
@@ -114,6 +136,9 @@
         <span class="team away">{{ m.away }}</span>
       </div>
       {% endfor %}
+      {% if round.with_result < round.total_matches %}
+        <p class="muted" style="margin:6px 0 8px;">{{ round.total_matches - round.with_result }} jogo(s) sem resultado ainda.</p>
+      {% endif %}
       <div class="row">
         <form method="post" action="{{ url_for('finalizar_rodada', round_id=round.id) }}" style="display:inline;">
           <button class="btn" type="submit">{{ 'Buscar resultados novamente' if round.finished else 'Finalizar rodada' }}</button>
@@ -126,9 +151,20 @@
       <div id="manual-{{ round.id }}" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);">
         <form method="post" action="{{ url_for('salvar_manual', round_id=round.id) }}">
           {% for m in round.matches %}
-          <div class="match"><span class="team home">{{ m.home }}</span><span class="score-inputs"><input type="number" min="0" name="home_{{ m.id }}" value="{{ m.home_goals if m.home_goals is not none else '' }}" placeholder="-"><span class="vs">x</span><input type="number" min="0" name="away_{{ m.id }}" value="{{ m.away_goals if m.away_goals is not none else '' }}" placeholder="-"></span><span class="team away">{{ m.away }}</span></div>
+          <div class="match"><span class="team home">{{ m.home }}</span><span class="score-inputs"><input type="number" min="0" name="home_{{ m.id }}" value="{{ m.home_goals if m.home_goals is not none else '' }}" placeholder="-"><span class="vs">x</span><input type="number" min="0" name="away_{{ m.id }}" value="{{ m.away_goals if m.away_goals is not none else '' }}" placeholder="-"></span><span class="team away">{{ m.away }}</span>
+            <button class="btn danger" type="submit" formaction="{{ url_for('remover_jogo', round_id=round.id, match_id=m.id) }}" onclick="return confirm('Remover o jogo {{ m.home }} x {{ m.away }} e os palpites feitos nele?');">Remover jogo</button></div>
           {% endfor %}
+          <p class="muted" style="margin:8px 0 0;">Resultados digitados aqui não são sobrescritos pela busca automática. Deixe os dois campos em branco para voltar a usar a busca.</p>
           <div class="row" style="margin-top:8px;"><button class="btn secondary" type="submit">Salvar correções</button></div>
+        </form>
+        <form method="post" action="{{ url_for('adicionar_jogo', round_id=round.id) }}" style="margin-top:12px;">
+          <p class="muted" style="margin:0 0 6px;">Faltou algum jogo nesta rodada? Adicione:</p>
+          <div class="row">
+            <input type="text" name="home" placeholder="Mandante" style="flex:1;min-width:130px;" required>
+            <span class="vs">x</span>
+            <input type="text" name="away" placeholder="Visitante" style="flex:1;min-width:130px;" required>
+            <button class="btn secondary" type="submit">Adicionar jogo</button>
+          </div>
         </form>
       </div>
       <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);">
