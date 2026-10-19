@@ -1,6 +1,24 @@
 {% extends "base.html" %}
 {% block content %}
 
+{% if saved %}
+<div class="card">
+  <div class="section-kicker">PALPITE SALVO</div>
+  <p style="margin:0;">
+    <b>{{ saved.name }}</b> · {{ saved.round }}<br>
+    {% if saved.with_result == 0 %}
+      <span class="muted">Ainda não há resultados para calcular os pontos.</span>
+    {% else %}
+      <b style="color:var(--green-ok, #5ad17a);">{{ saved.pts }} pts</b>
+      {% if saved.with_result < saved.total %}<span class="muted">até agora ({{ saved.with_result }} de {{ saved.total }} jogos com resultado)</span>{% endif %}
+    {% endif %}
+  </p>
+  {% if saved.count < saved.total %}
+    <p style="margin:6px 0 0;color:#f0906f;">Atenção: o palpite cobre só {{ saved.count }} de {{ saved.total }} jogos da rodada. Confira se os nomes dos times estão iguais.</p>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
   <div class="section-kicker">CHAMPIONS LEAGUE · PALPITES</div>
   <h2>Colar palpite</h2>
@@ -81,7 +99,7 @@
 <div class="card">
   <h2>Rodadas de futebol cadastradas</h2>
   {% for round in rounds %}
-    <div style="margin-bottom:18px;">
+    <div id="round-{{ round.id }}" style="margin-bottom:18px;">
       <div class="round-header">
         <b>{{ round.name }}</b>
         <span class="round-tag {{ 'encerrada' if round.finished else 'aberta' }}">{{ 'encerrada' if round.finished else 'aberta' }}</span>
@@ -114,12 +132,35 @@
         </form>
       </div>
       <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);">
-        {% if round.picks_players|length == 0 %}<p class="muted" style="margin:0;">Nenhum palpite registrado.</p>
-        {% else %}
-          <p class="muted" style="margin:0 0 6px;">Palpites registrados:</p>
-          {% for p in round.picks_players %}
-          <div class="row" style="margin-bottom:4px;"><span style="flex:1;">{{ p.name }}</span><form method="post" action="{{ url_for('remover_palpite', round_id=round.id, player_id=p.id) }}" onsubmit="return confirm('Remover o palpite de {{ p.name }}?');"><button class="btn danger" type="submit">Remover palpite</button></form></div>
+        <p class="muted" style="margin:0 0 6px;">Placar da rodada:</p>
+        {% if round.scored|length == 0 and round.absent|length == 0 %}<p class="muted" style="margin:0 0 6px;">Nenhum palpite registrado.</p>{% endif %}
+        {% for p in round.scored %}
+        <div class="row" style="margin-bottom:4px;">
+          <span style="flex:1;">{{ p.name }}
+            {% if round.with_result == 0 %}<span class="muted"> · aguardando resultados</span>
+            {% else %}<b> · {{ p.pts }} pts</b>{% if round.with_result < round.total_matches %}<span class="muted"> (parcial)</span>{% endif %}{% endif %}
+            {% if p.count < round.total_matches %}<span style="color:#f0906f;"> · {{ p.count }}/{{ round.total_matches }} jogos</span>{% endif %}
+          </span>
+          <form method="post" action="{{ url_for('remover_palpite', round_id=round.id, player_id=p.id) }}" onsubmit="return confirm('Remover o palpite de {{ p.name }}?');"><button class="btn danger" type="submit">Remover palpite</button></form>
+        </div>
+        {% endfor %}
+        {% for p in round.absent %}
+        <div class="row" style="margin-bottom:4px;">
+          <span style="flex:1;">{{ p.name }}<b> · 0 pts</b><span class="muted"> · não palpitou</span></span>
+          <form method="post" action="{{ url_for('desfazer_nao_palpitou', round_id=round.id, player_id=p.id) }}"><button class="btn secondary" type="submit">Desfazer</button></form>
+        </div>
+        {% endfor %}
+        {% if round.pending|length > 0 %}
+          <p class="muted" style="margin:10px 0 6px;">Ainda sem palpite:</p>
+          {% for p in round.pending %}
+          <div class="row" style="margin-bottom:4px;">
+            <span style="flex:1;">{{ p.name }}</span>
+            <form method="post" action="{{ url_for('nao_palpitou', round_id=round.id, player_id=p.id) }}"><button class="btn secondary" type="submit">Não palpitou</button></form>
+          </div>
           {% endfor %}
+          <form method="post" action="{{ url_for('nao_palpitou_todos', round_id=round.id) }}" style="margin-top:8px;" onsubmit="return confirm('Marcar todos os jogadores sem palpite como &quot;não palpitou&quot; (0 pts)?');">
+            <button class="btn secondary" type="submit">Marcar todos como "Não palpitou"</button>
+          </form>
         {% endif %}
       </div>
     </div>

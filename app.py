@@ -125,6 +125,11 @@ SCHEMA = [
         away_guess INTEGER NOT NULL,
         PRIMARY KEY (round_id, player_id, match_id)
     )""",
+    """CREATE TABLE IF NOT EXISTS round_no_shows (
+        round_id TEXT NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
+        player_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        PRIMARY KEY (round_id, player_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS tournament_rounds (
         id TEXT PRIMARY KEY,
         number INTEGER NOT NULL,
@@ -267,6 +272,42 @@ def player_round_points(db, round_id, player_id):
         if pts is not None:
             total += pts
     return total
+
+
+def round_scoreboard(db, round_id, matches, players):
+    """Separa os jogadores de uma rodada e calcula os pontos de quem palpitou.
+
+    Retorna (palpitaram, nao_palpitaram, sem_registro). Os pontos contam só
+    os jogos que já têm resultado.
+    """
+    picks = db.execute(
+        "SELECT player_id, match_id, home_guess, away_guess FROM picks WHERE round_id = ?", (round_id,)
+    ).fetchall()
+    by_player = {}
+    for pk in picks:
+        by_player.setdefault(pk["player_id"], {})[pk["match_id"]] = pk
+    no_shows = {
+        r["player_id"]
+        for r in db.execute("SELECT player_id FROM round_no_shows WHERE round_id = ?", (round_id,)).fetchall()
+    }
+    scored, absent, pending = [], [], []
+    for p in players:
+        mine = by_player.get(p["id"])
+        if mine:
+            pts = 0
+            for m in matches:
+                pk = mine.get(m["id"])
+                if pk:
+                    v = points_for(pk["home_guess"], pk["away_guess"], m["home_goals"], m["away_goals"])
+                    if v is not None:
+                        pts += v
+            scored.append({"id": p["id"], "name": p["name"], "pts": pts, "count": len(mine)})
+        elif p["id"] in no_shows:
+            absent.append({"id": p["id"], "name": p["name"]})
+        else:
+            pending.append({"id": p["id"], "name": p["name"]})
+    scored.sort(key=lambda x: (-x["pts"], x["name"].lower()))
+    return scored, absent, pending
 
 
 def get_tournament_rounds(db, phase=None):
@@ -608,6 +649,7 @@ def save_picks(db, round_id, player_id, parsed_matches):
                 )
                 matched += 1
                 break
+    db.execute("DELETE FROM round_no_shows WHERE round_id=? AND player_id=?", (round_id, player_id))
     db.commit()
     return matched
 
@@ -719,18 +761,22 @@ def rodadas():
     for r in rounds_rows:
         matches = db.execute("SELECT * FROM matches WHERE round_id=? ORDER BY position", (r["id"],)).fetchall()
         finished = round_is_finished(db, r["id"])
-        picks_players = db.execute(
-            "SELECT DISTINCT players.id, players.name FROM picks JOIN players ON players.id=picks.player_id WHERE picks.round_id=? ORDER BY players.name",
-            (r["id"],),
-        ).fetchall()
-        round_scores = []
-        if finished:
-            for p in picks_players:
-                round_scores.append({"name": p["name"], "pts": player_round_points(db, r["id"], p["id"])})
-            round_scores.sort(key=lambda x: -x["pts"])
+        scored, absent, pending = round_scoreboard(db, r["id"], matches, players)
+        with_result = sum(1 for m in matches if m["home_goals"] is not None and m["away_goals"] is not None)
         tr = db.execute("SELECT * FROM tournament_rounds WHERE football_round_id=?", (r["id"],)).fetchone()
         rounds.append({"id": r["id"], "name": r["name"], "matches": matches, "finished": finished,
-                       "picks_players": picks_players, "round_scores": round_scores, "tournament": tr})
+                       "scored": scored, "absent": absent, "pending": pending,
+                       "total_matches": len(matches), "with_result": with_result, "tournament": tr})
+
+    # Aviso logo após salvar um palpite: mostra os pontos que o jogador fez.
+    saved = None
+    sp, sr = request.args.get("salvo_jogador"), request.args.get("salvo_rodada")
+    if sp and sr:
+        rd = next((x for x in rounds if x["id"] == sr), None)
+        entry = next((x for x in rd["scored"] if x["id"] == sp), None) if rd else None
+        if entry:
+            saved = {"name": entry["name"], "round": rd["name"], "pts": entry["pts"], "count": entry["count"],
+                     "total": rd["total_matches"], "with_result": rd["with_result"]}
 
     create_full_league_schedule(db)
     league_trs = get_tournament_rounds(db, "league")
@@ -752,7 +798,7 @@ def rodadas():
     return render_template("rodadas.html", players=players, rounds=rounds, active="rodadas",
                            tournament_rounds=league_trs, playoff_rounds=playoff_trs,
                            matchup_map=matchup_map, standings=standings, playoff_series=playoff_series(db),
-                           sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok)
+                           sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok, saved=saved)
 
 
 @app.route("/rodadas/palpite", methods=["POST"])
@@ -785,7 +831,8 @@ def salvar_palpite():
     except Exception:
         pass
     finalize_tournament_round(db, tr["id"])
-    return redirect(url_for("ranking" if round_is_finished(db, round_row["id"]) else "rodadas"))
+    return redirect(url_for("rodadas", salvo_jogador=player_id, salvo_rodada=round_row["id"],
+                            _anchor=f"round-{round_row['id']}"))
 
 
 @app.route("/rodadas/torneio/<tournament_round_id>/sem-jogos", methods=["POST"])
@@ -857,10 +904,56 @@ def excluir_rodada(round_id):
     # os jogos de futebol não altere o chaveamento do torneio.
     db.execute("UPDATE tournament_rounds SET football_round_id=NULL WHERE football_round_id=?", (round_id,))
     db.execute("DELETE FROM picks WHERE round_id=?", (round_id,))
+    db.execute("DELETE FROM round_no_shows WHERE round_id=?", (round_id,))
     db.execute("DELETE FROM matches WHERE round_id=?", (round_id,))
     db.execute("DELETE FROM rounds WHERE id=?", (round_id,))
     db.commit()
     return redirect(url_for("ranking"))
+
+
+@app.route("/rodadas/<round_id>/nao-palpitou/<player_id>", methods=["POST"])
+def nao_palpitou(round_id, player_id):
+    """Registra que o jogador não palpitou na rodada: ele fica com 0 pontos."""
+    db = get_db()
+    has_picks = db.execute(
+        "SELECT 1 FROM picks WHERE round_id=? AND player_id=?", (round_id, player_id)
+    ).fetchone()
+    exists = db.execute("SELECT 1 FROM rounds WHERE id=?", (round_id,)).fetchone() and \
+        db.execute("SELECT 1 FROM players WHERE id=?", (player_id,)).fetchone()
+    if exists and not has_picks:
+        db.execute(
+            "INSERT INTO round_no_shows (round_id, player_id) VALUES (?, ?) ON CONFLICT (round_id, player_id) DO NOTHING",
+            (round_id, player_id),
+        )
+        db.commit()
+    return redirect(url_for("rodadas", _anchor=f"round-{round_id}"))
+
+
+@app.route("/rodadas/<round_id>/desfazer-nao-palpitou/<player_id>", methods=["POST"])
+def desfazer_nao_palpitou(round_id, player_id):
+    db = get_db()
+    db.execute("DELETE FROM round_no_shows WHERE round_id=? AND player_id=?", (round_id, player_id))
+    db.commit()
+    return redirect(url_for("rodadas", _anchor=f"round-{round_id}"))
+
+
+@app.route("/rodadas/<round_id>/nao-palpitou-todos", methods=["POST"])
+def nao_palpitou_todos(round_id):
+    """Marca como "não palpitou" todos os jogadores que ainda não têm palpite na rodada."""
+    db = get_db()
+    if db.execute("SELECT 1 FROM rounds WHERE id=?", (round_id,)).fetchone():
+        players = db.execute("SELECT id FROM players").fetchall()
+        with_picks = {r["player_id"] for r in db.execute(
+            "SELECT DISTINCT player_id FROM picks WHERE round_id=?", (round_id,)).fetchall()}
+        for p in players:
+            if p["id"] not in with_picks:
+                db.execute(
+                    "INSERT INTO round_no_shows (round_id, player_id) VALUES (?, ?) "
+                    "ON CONFLICT (round_id, player_id) DO NOTHING",
+                    (round_id, p["id"]),
+                )
+        db.commit()
+    return redirect(url_for("rodadas", _anchor=f"round-{round_id}"))
 
 
 @app.route("/rodadas/<round_id>/remover_palpite/<player_id>", methods=["POST"])
@@ -900,6 +993,7 @@ def ajustar_pontos(player_id):
 def remover_jogador(player_id):
     db = get_db()
     db.execute("DELETE FROM picks WHERE player_id=?", (player_id,))
+    db.execute("DELETE FROM round_no_shows WHERE player_id=?", (player_id,))
     db.execute("DELETE FROM tournament_matchups WHERE player1_id=? OR player2_id=?", (player_id, player_id))
     db.execute("DELETE FROM players WHERE id=?", (player_id,))
     db.commit()
@@ -910,6 +1004,7 @@ def remover_jogador(player_id):
 def remover_todos_jogadores():
     db = get_db()
     db.execute("DELETE FROM picks")
+    db.execute("DELETE FROM round_no_shows")
     db.execute("DELETE FROM tournament_matchups")
     # O sorteio da fase de liga depende dos jogadores cadastrados. Apagando as
     # rodadas do torneio, o sorteio é refeito do zero quando houver novos jogadores.
@@ -923,6 +1018,7 @@ def remover_todos_jogadores():
 def reset_players():
     db = get_db()
     db.execute("DELETE FROM picks")
+    db.execute("DELETE FROM round_no_shows")
     db.execute("DELETE FROM tournament_matchups")
     db.execute("DELETE FROM tournament_rounds")
     db.execute("DELETE FROM matches")
