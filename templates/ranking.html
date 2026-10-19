@@ -69,10 +69,21 @@
 {% endif %}
 
 {% if ranking|length > 0 %}
-<div class="card">
+<div class="card" id="compartilhar">
   <h2>Compartilhar classificação</h2>
-  <p class="muted" style="margin:0 0 8px;">Texto pronto para colar no grupo do WhatsApp:</p>
-  <textarea id="rankingCopyText" readonly style="min-height:{{ (ranking|length * 22 + 40) }}px;">{{ copy_text }}</textarea>
+  <p class="muted" style="margin:0 0 8px;">Texto pronto para colar no grupo do WhatsApp, com a classificação e os confrontos de uma rodada:</p>
+  {% if share_rounds %}
+  <form method="get" action="{{ url_for('ranking', _anchor='compartilhar') }}" class="row" style="margin:0 0 8px;">
+    <label class="muted" for="shareRound">Confrontos da</label>
+    <select id="shareRound" name="rodada" onchange="this.form.submit()">
+      {% for o in share_rounds %}
+      <option value="{{ o.number }}" {{ 'selected' if o.number == copy_round else '' }}>Rodada {{ o.number }}{% if o.skipped %} (sem jogos){% elif not o.finished %} (sem resultados){% endif %}</option>
+      {% endfor %}
+    </select>
+    <noscript><button class="btn secondary" type="submit">Ver</button></noscript>
+  </form>
+  {% endif %}
+  <textarea id="rankingCopyText" readonly style="min-height:{{ ([copy_text.split('\n')|length * 21 + 30, 420]|min) }}px;">{{ copy_text }}</textarea>
   <div class="row" style="margin-top:8px;">
     <button class="btn" id="copyRankingBtn">Copiar texto</button>
     <span class="muted" id="copyRankingMsg"></span>

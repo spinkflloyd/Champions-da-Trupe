@@ -595,11 +595,82 @@ def playoff_series(db):
     return result
 
 
-def build_ranking_text(db):
-    ranking = league_standings(db)
+def share_round_options(db):
+    """Rodadas da liga que podem aparecer no texto de compartilhar (sorteadas ou sem jogos)."""
+    drawn = {r["rid"] for r in db.execute(
+        "SELECT DISTINCT tournament_round_id AS rid FROM tournament_matchups").fetchall()}
+    options = []
+    for tr in get_tournament_rounds(db, "league"):
+        if tr["skipped"] or tr["id"] in drawn:
+            finished = bool(tr["skipped"]) or (
+                bool(tr["football_round_id"]) and round_is_finished(db, tr["football_round_id"]))
+            options.append({"number": tr["number"], "finished": finished, "skipped": bool(tr["skipped"])})
+    return options
+
+
+def default_share_round(options):
+    """Por padrão, a última rodada encerrada (a que você acabou de finalizar)."""
+    done = [o["number"] for o in options if o["finished"] and not o["skipped"]]
+    return max(done) if done else None
+
+
+def build_ranking_text(db, round_number=None):
+    """Texto para colar no WhatsApp: classificação + confrontos de UMA rodada, com os resultados."""
+    ranking = league_standings(db)  # também atualiza os placares dos confrontos já encerrados
+    options = share_round_options(db)
+    if round_number not in {o["number"] for o in options}:
+        round_number = default_share_round(options)
     lines = ["CLASSIFICAÇÃO - FASE DE LIGA"]
     for i, row in enumerate(ranking, 1):
         lines.append(f"{i}. {row['player']['name']}: {row['points']} pts")
+
+    all_names = {p["id"]: p["name"] for p in db.execute("SELECT id, name FROM players").fetchall()}
+    rounds = [tr for tr in get_tournament_rounds(db, "league") if tr["number"] == round_number]
+    matchups = db.execute(
+        "SELECT tm.tournament_round_id AS rid, tm.player1_id AS p1, tm.player2_id AS p2, "
+        "tm.result AS result, tm.player1_score AS s1, tm.player2_score AS s2 "
+        "FROM tournament_matchups tm JOIN tournament_rounds tr ON tr.id = tm.tournament_round_id "
+        "WHERE tr.phase = 'league'"
+    ).fetchall()
+    by_round = {}
+    for m in matchups:
+        by_round.setdefault(m["rid"], []).append(m)
+
+    blocks = []
+    for tr in rounds:
+        if tr["skipped"]:
+            blocks.append([f"Rodada {tr['number']}: sem jogos (todos ganharam 3 pts)"])
+            continue
+        ms = by_round.get(tr["id"])
+        if not ms:
+            continue  # rodada ainda não sorteada
+        finished = bool(tr["football_round_id"]) and round_is_finished(db, tr["football_round_id"])
+        block = [f"Rodada {tr['number']}" + ("" if finished else " (aguardando resultados)")]
+        playing = set()
+        for m in sorted(ms, key=lambda x: all_names.get(x["p1"], "").lower()):
+            n1, n2 = all_names.get(m["p1"], "?"), all_names.get(m["p2"], "?")
+            playing.update((m["p1"], m["p2"]))
+            if finished and m["result"]:
+                block.append(f"{n1} {m['s1']} x {m['s2']} {n2}")
+            else:
+                block.append(f"{n1} x {n2}")
+        resting = sorted(all_names[pid] for pid in all_names if pid not in playing)
+        if resting:
+            block.append("Folga: " + ", ".join(resting))
+        blocks.append(block)
+    if blocks:
+        lines.append("")
+        lines.append("CONFRONTOS")
+        for block in blocks:
+            lines.append("")
+            lines.extend(block)
+
+    series = playoff_series(db)
+    if series:
+        lines.append("")
+        lines.append("PLAYOFF (melhor de 4 jogos)")
+        for sr in series:
+            lines.append(f"{sr['p1_name']} {sr['p1_wins']} x {sr['p2_wins']} {sr['p2_name']} ({sr['completed_games']}/4 jogos)")
     return "\n".join(lines)
 
 
@@ -740,9 +811,13 @@ def ranking():
     db = get_db()
     rows = league_standings(db)
     ref = get_reference_round(db)
-    copy_text = build_ranking_text(db) if rows else ""
+    share_rounds = share_round_options(db)
+    requested = request.args.get("rodada", type=int)
+    copy_round = requested if requested in {o["number"] for o in share_rounds} else default_share_round(share_rounds)
+    copy_text = build_ranking_text(db, copy_round) if rows else ""
     playoff_rows = playoff_series(db)
     return render_template("ranking.html", ranking=rows, copy_text=copy_text, active="ranking",
+                           share_rounds=share_rounds, copy_round=copy_round,
                            league_round_count=sum(1 for r in get_tournament_rounds(db, "league") if r["football_round_id"] or r["skipped"]),
                            playoff_pairs=rows[4:12] if len(rows) >= 12 else [], playoff_series=playoff_rows,
                            ref_round=ref)
@@ -905,7 +980,11 @@ def finalizar_rodada(round_id):
     tr = db.execute("SELECT * FROM tournament_rounds WHERE football_round_id=?", (round_id,)).fetchone()
     if tr:
         finalize_tournament_round(db, tr["id"])
-    return redirect(url_for("ranking" if round_is_finished(db, round_id) else "rodadas"))
+    if round_is_finished(db, round_id):
+        if tr and tr["phase"] == "league":
+            return redirect(url_for("ranking", rodada=tr["number"], _anchor="compartilhar"))
+        return redirect(url_for("ranking"))
+    return redirect(url_for("rodadas"))
 
 
 @app.route("/rodadas/<round_id>/manual", methods=["POST"])
