@@ -232,8 +232,11 @@ def init_db():
         db.close()
 
 
+_TRANSLIT = str.maketrans({"ø": "o", "æ": "ae", "œ": "oe", "ß": "ss", "ł": "l", "đ": "d", "ð": "d", "ı": "i"})
+
+
 def normalize_name(s):
-    s = (s or "").lower().strip()
+    s = (s or "").lower().strip().translate(_TRANSLIT)  # "Bodø" -> "bodo"
     s = unicodedata.normalize("NFD", s)
     return "".join(c for c in s if unicodedata.category(c) != "Mn")
 
@@ -823,13 +826,36 @@ def teams_match(api_name, our_name):
     return bool(a and b and (a == b or a in b or b in a))
 
 
+def team_matches(team, our_name):
+    """Compara um time da API (name, shortName, tla) com o nome escrito no palpite.
+
+    Aceita nomes abreviados como "PSG" ou "Bodo Glimt" (sem o "/" do nome oficial).
+    A sigla (tla) só vale se for idêntica, para não confundir clubes parecidos.
+    """
+    b = canonical_team(our_name)
+    if not b:
+        return False
+    if canonical_team(team.get("tla")) == b:
+        return True
+    for cand in (team.get("name"), team.get("shortName")):
+        a = canonical_team(cand)
+        if not a:
+            continue
+        if a == b or a in b or b in a:
+            return True
+        a2, b2 = a.replace(" ", ""), b.replace(" ", "")
+        if a2 == b2 or a2 in b2 or b2 in a2:
+            return True
+    return False
+
+
 _API_CACHE = {"time": 0.0, "matches": None}
 API_CACHE_SECONDS = 60
 
 
-def fetch_results_from_football_data(matches, fresh=False):
-    """Consulta a football-data.org. A resposta fica 60 s em memória para não
-    repetir a chamada a cada palpite colado (o plano gratuito tem limite)."""
+def get_api_matches(fresh=False):
+    """Todos os jogos da Champions na football-data.org. Fica 60 s em memória para não
+    repetir a chamada (o plano gratuito tem limite de requisições)."""
     if not FOOTBALL_DATA_TOKEN:
         raise RuntimeError(
             "A variável de ambiente FOOTBALL_DATA_TOKEN não está configurada "
@@ -837,25 +863,116 @@ def fetch_results_from_football_data(matches, fresh=False):
         )
     now = time.time()
     if not fresh and _API_CACHE["matches"] is not None and now - _API_CACHE["time"] < API_CACHE_SECONDS:
-        api_matches = _API_CACHE["matches"]
-    else:
-        resp = requests.get(
-            f"https://api.football-data.org/v4/competitions/{COMPETITION_CODE}/matches",
-            headers={"X-Auth-Token": FOOTBALL_DATA_TOKEN}, timeout=10,
-        )
-        data = resp.json()
-        if resp.status_code != 200:
-            raise RuntimeError(f"A football-data.org retornou um erro: {data.get('message', data)}")
-        api_matches = data.get("matches", [])
-        _API_CACHE["time"], _API_CACHE["matches"] = now, api_matches
+        return _API_CACHE["matches"]
+    resp = requests.get(
+        f"https://api.football-data.org/v4/competitions/{COMPETITION_CODE}/matches",
+        headers={"X-Auth-Token": FOOTBALL_DATA_TOKEN}, timeout=10,
+    )
+    data = resp.json()
+    if resp.status_code != 200:
+        raise RuntimeError(f"A football-data.org retornou um erro: {data.get('message', data)}")
+    api_matches = data.get("matches", [])
+    _API_CACHE["time"], _API_CACHE["matches"] = now, api_matches
+    return api_matches
+
+
+def fetch_results_from_football_data(matches, fresh=False):
+    api_matches = get_api_matches(fresh=fresh)
     results = []
     for m in matches:
-        found = next((fx for fx in api_matches if teams_match(fx["homeTeam"]["name"], m["home"]) and teams_match(fx["awayTeam"]["name"], m["away"])), None)
+        found = next((fx for fx in api_matches
+                      if team_matches(fx["homeTeam"], m["home"]) and team_matches(fx["awayTeam"], m["away"])), None)
         if found and found.get("status") == "FINISHED" and found.get("score", {}).get("fullTime", {}).get("home") is not None:
             results.append({"found": True, "home_goals": found["score"]["fullTime"]["home"], "away_goals": found["score"]["fullTime"]["away"]})
         else:
             results.append({"found": False})
     return results
+
+
+# Como o grupo escreve o nome de cada clube (trecho do nome oficial -> nome usado).
+TEAM_DISPLAY = [
+    ("saintgermain", "PSG"), ("manchester city", "Manchester City"), ("manchester united", "Manchester United"),
+    ("bayern", "Bayern"), ("atletico", "Atlético de Madrid"), ("bodo", "Bodo Glimt"), ("betis", "Betis"),
+    ("brugge", "Brugge"), ("internazionale", "Inter"), ("sporting", "Sporting"), ("leipzig", "Leipzig"),
+    ("slavia", "Slavia Praha"), ("dortmund", "Borussia Dortmund"), ("aek", "AEK"), ("fenerbahce", "Fenerbahçe"),
+    ("shakhtar", "Shakhtar Donetsk"), ("slovan", "Slovan Bratislava"), ("psv", "PSV"), ("porto", "Porto"),
+]
+_NAME_NOISE = {"fc", "cf", "sk", "fk", "kv", "osc", "ssc", "ac", "as", "afc", "sc", "club", "fa", "ks", "bk", "rc"}
+
+
+def display_team_name(team):
+    """Nome do time no estilo do grupo (ex.: "PSG", "Bodo Glimt", "Atlético de Madrid")."""
+    blob = f"{canonical_team(team.get('name'))} {canonical_team(team.get('shortName'))}"
+    for key, shown in TEAM_DISPLAY:
+        if key in blob:
+            return shown
+    base = (team.get("shortName") or team.get("name") or "").strip()
+    words = [w for w in base.split() if w.lower().strip(".") not in _NAME_NOISE and not w.isdigit()]
+    return " ".join(words) or base
+
+
+NOT_STARTED = {"SCHEDULED", "TIMED"}
+STAGE_LABELS = {
+    "PLAYOFFS": "PLAYOFFS", "LAST_16": "OITAVAS DE FINAL", "QUARTER_FINALS": "QUARTAS DE FINAL",
+    "SEMI_FINALS": "SEMIFINAL", "FINAL": "FINAL",
+}
+
+
+def _round_key(fx):
+    """Agrupa os jogos por rodada (fase + número; sem número, pela semana do jogo)."""
+    md = fx.get("matchday")
+    if md is None:
+        try:
+            d = datetime.strptime((fx.get("utcDate") or "")[:10], "%Y-%m-%d")
+            md = "w%d-%02d" % d.isocalendar()[:2]
+        except ValueError:
+            md = "?"
+    return (fx.get("stage"), md)
+
+
+def build_next_round_text(requested=None, fresh=True):
+    """Monta o texto dos jogos de uma rodada no formato do WhatsApp.
+
+    Sem `requested`, usa a próxima rodada que ainda não começou. Com um número,
+    usa essa rodada da fase de liga. Retorna {"texto": str|None, "erro": str|None}.
+    """
+    try:
+        api_matches = get_api_matches(fresh=fresh)
+    except RuntimeError as exc:
+        return {"texto": None, "erro": str(exc)}
+    except requests.RequestException:
+        return {"texto": None, "erro": "Não consegui falar com a football-data.org agora. Tente de novo em instantes."}
+
+    groups = {}
+    for fx in api_matches:
+        groups.setdefault(_round_key(fx), []).append(fx)
+    ordered = sorted(groups.items(), key=lambda kv: min((m.get("utcDate") or "9999") for m in kv[1]))
+
+    chosen = None
+    for (stage, md), ms in ordered:
+        if requested:
+            if stage == "LEAGUE_STAGE" and md == requested:
+                chosen = (stage, md, ms)
+                break
+        elif all(m.get("status") in NOT_STARTED for m in ms):
+            chosen = (stage, md, ms)
+            break
+    if chosen is None:
+        msg = "Não encontrei essa rodada na football-data.org." if requested else \
+            "Não encontrei uma próxima rodada que ainda não tenha começado."
+        return {"texto": None, "erro": msg}
+
+    stage, md, ms = chosen
+    games = [m for m in ms if (m.get("homeTeam") or {}).get("name") and (m.get("awayTeam") or {}).get("name")]
+    if not games:
+        return {"texto": None, "erro": "Os confrontos desta fase ainda não foram definidos."}
+    games.sort(key=lambda m: m.get("utcDate") or "")  # estável: mantém a ordem da API dentro do mesmo horário
+    if stage == "LEAGUE_STAGE":
+        title = f"{COMPETITION_NAME.upper()} - {md}° RODADA"
+    else:
+        title = f"{COMPETITION_NAME.upper()} - {STAGE_LABELS.get(stage, (stage or '').replace('_', ' '))}"
+    lines = [title] + [f"{display_team_name(m['homeTeam'])} x {display_team_name(m['awayTeam'])}" for m in games]
+    return {"texto": "\n".join(lines), "erro": None}
 
 
 def apply_results_to_round(db, round_id, only_missing=False, fresh=False):
@@ -999,6 +1116,12 @@ def rodadas():
             }
     not_found_games = request.args.getlist("nj")[:10]
 
+    # Jogos da próxima rodada (só consulta a API quando o botão é clicado).
+    proxima = None
+    pedido = request.args.get("proxima")
+    if pedido:
+        proxima = build_next_round_text(int(pedido) if pedido.isdigit() else None)
+
     sorteio_msg, sorteio_ok = None, False
     code = request.args.get("sorteio")
     n = request.args.get("rodada", type=int)
@@ -1023,7 +1146,8 @@ def rodadas():
                            tournament_rounds=league_trs, playoff_rounds=playoff_trs,
                            matchup_map=matchup_map, playoff_series=playoff_series(db, scores),
                            sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok, saved=saved,
-                           resultados=resultados, not_found_games=not_found_games)
+                           resultados=resultados, not_found_games=not_found_games,
+                           proxima=proxima, proxima_pedido=pedido or "")
 
 
 @app.route("/rodadas/palpite", methods=["POST"])
