@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import time
 import unicodedata
 import uuid
 from datetime import datetime
@@ -53,9 +54,10 @@ class DB:
     O código escreve as consultas com "?"; no Postgres elas viram "%s".
     """
 
-    def __init__(self, conn, is_pg):
+    def __init__(self, conn, is_pg, pool=None):
         self.conn = conn
         self.is_pg = is_pg
+        self.pool = pool
 
     def execute(self, sql, args=()):
         if self.is_pg:
@@ -66,14 +68,43 @@ class DB:
         self.conn.commit()
 
     def close(self):
-        self.conn.close()
+        if self.pool is not None:
+            try:
+                self.conn.rollback()  # devolve a conexão limpa ao pool
+            finally:
+                self.pool.putconn(self.conn)
+        else:
+            self.conn.close()
+
+
+_pool = None
+_PG_KWARGS = {"connect_timeout": 15, "prepare_threshold": None}
+
+
+def _get_pool():
+    """Pool de conexões com o Postgres: evita abrir uma conexão nova (TLS) a cada página."""
+    global _pool
+    if _pool is None:
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError:
+            return None  # sem o pacote, cai na conexão simples
+        _pool = ConnectionPool(
+            DATABASE_URL, min_size=1, max_size=5, open=True,
+            check=ConnectionPool.check_connection,
+            kwargs=dict(_PG_KWARGS, row_factory=_pg_row_factory),
+        )
+    return _pool
 
 
 def connect_db():
     if DATABASE_URL:
+        pool = _get_pool()
+        if pool is not None:
+            return DB(pool.getconn(), True, pool)
         import psycopg
 
-        conn = psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory, connect_timeout=15)
+        conn = psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory, **_PG_KWARGS)
         return DB(conn, True)
     folder = os.path.dirname(DB_PATH)
     if folder:
@@ -149,6 +180,9 @@ SCHEMA = [
         player1_score INTEGER,
         player2_score INTEGER
     )""",
+    "CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(round_id)",
+    "CREATE INDEX IF NOT EXISTS idx_matchups_round ON tournament_matchups(tournament_round_id)",
+    "CREATE INDEX IF NOT EXISTS idx_trounds_football ON tournament_rounds(football_round_id)",
 ]
 
 
@@ -157,7 +191,7 @@ def init_db():
     try:
         if db.is_pg:
             # Evita que dois processos criem as tabelas ao mesmo tempo.
-            db.execute("SELECT pg_advisory_lock(727274)")
+            db.execute("SELECT pg_advisory_xact_lock(727274)")
             exists = db.execute(
                 "SELECT 1 FROM information_schema.tables "
                 "WHERE table_schema = current_schema() AND table_name = 'players'"
@@ -195,7 +229,7 @@ def init_db():
                 )
         db.commit()
     finally:
-        db.close()  # também libera o lock do Postgres
+        db.close()
 
 
 def normalize_name(s):
@@ -279,22 +313,16 @@ def player_round_points(db, round_id, player_id):
     return total
 
 
-def round_scoreboard(db, round_id, matches, players):
+def round_scoreboard(matches, picks, no_shows, players):
     """Separa os jogadores de uma rodada e calcula os pontos de quem palpitou.
 
-    Retorna (palpitaram, nao_palpitaram, sem_registro). Os pontos contam só
-    os jogos que já têm resultado.
+    Recebe os dados já carregados (sem consultar o banco). Retorna
+    (palpitaram, nao_palpitaram, sem_registro). Os pontos contam só os jogos
+    que já têm resultado.
     """
-    picks = db.execute(
-        "SELECT player_id, match_id, home_guess, away_guess FROM picks WHERE round_id = ?", (round_id,)
-    ).fetchall()
     by_player = {}
     for pk in picks:
         by_player.setdefault(pk["player_id"], {})[pk["match_id"]] = pk
-    no_shows = {
-        r["player_id"]
-        for r in db.execute("SELECT player_id FROM round_no_shows WHERE round_id = ?", (round_id,)).fetchall()
-    }
     scored, absent, pending = [], [], []
     for p in players:
         mine = by_player.get(p["id"])
@@ -313,6 +341,64 @@ def round_scoreboard(db, round_id, matches, players):
             pending.append({"id": p["id"], "name": p["name"]})
     scored.sort(key=lambda x: (-x["pts"], x["name"].lower()))
     return scored, absent, pending
+
+
+def compute_scores(trs, matches, picks):
+    """Pontos de cada jogador em cada rodada do torneio, calculados ao vivo.
+
+    Retorna {tournament_round_id: {"finished": bool, "points": {player_id: pts}}}.
+    """
+    matches_by_round, picks_by_round = {}, {}
+    for m in matches:
+        matches_by_round.setdefault(m["round_id"], []).append(m)
+    for pk in picks:
+        picks_by_round.setdefault(pk["round_id"], []).append(pk)
+    cache, scores = {}, {}
+    for tr in trs:
+        fid = tr["football_round_id"]
+        if not fid:
+            continue
+        if fid not in cache:
+            ms = matches_by_round.get(fid, [])
+            goals = {m["id"]: (m["home_goals"], m["away_goals"]) for m in ms}
+            finished = bool(ms) and all(h is not None and a is not None for h, a in goals.values())
+            points = {}
+            for pk in picks_by_round.get(fid, []):
+                hg, ag = goals.get(pk["match_id"], (None, None))
+                v = points_for(pk["home_guess"], pk["away_guess"], hg, ag)
+                points[pk["player_id"]] = points.get(pk["player_id"], 0) + (v or 0)
+            cache[fid] = {"finished": finished, "points": points}
+        scores[tr["id"]] = cache[fid]
+    return scores
+
+
+def tournament_scores(db):
+    """Carrega pontos de todas as rodadas do torneio em 3 consultas."""
+    trs = db.execute(
+        "SELECT id, football_round_id FROM tournament_rounds WHERE football_round_id IS NOT NULL"
+    ).fetchall()
+    if not trs:
+        return {}
+    fids = sorted({t["football_round_id"] for t in trs})
+    marks = ",".join("?" * len(fids))
+    matches = db.execute(
+        f"SELECT id, round_id, home_goals, away_goals FROM matches WHERE round_id IN ({marks})", fids
+    ).fetchall()
+    picks = db.execute(
+        f"SELECT round_id, player_id, match_id, home_guess, away_guess FROM picks WHERE round_id IN ({marks})",
+        fids,
+    ).fetchall()
+    return compute_scores(trs, matches, picks)
+
+
+def matchup_outcome(scores, tournament_round_id, player1_id, player2_id):
+    """Resultado de um confronto (None enquanto a rodada não estiver encerrada)."""
+    sc = scores.get(tournament_round_id)
+    if not sc or not sc["finished"]:
+        return None
+    s1 = sc["points"].get(player1_id, 0)
+    s2 = sc["points"].get(player2_id, 0)
+    return {"s1": s1, "s2": s2, "result": "P1" if s1 > s2 else ("P2" if s2 > s1 else "D")}
 
 
 def get_tournament_rounds(db, phase=None):
@@ -435,8 +521,13 @@ def draw_league_round(db, tournament_round_id):
     return True, "ok"
 
 
-def league_standings(db):
-    create_full_league_schedule(db)
+def league_standings(db, scores=None):
+    rounds = get_tournament_rounds(db, "league")
+    if not rounds:
+        create_full_league_schedule(db)
+        rounds = get_tournament_rounds(db, "league")
+    if scores is None:
+        scores = tournament_scores(db)
     players = db.execute("SELECT * FROM players ORDER BY name").fetchall()
     data = {
         p["id"]: {
@@ -445,32 +536,31 @@ def league_standings(db):
         }
         for p in players
     }
-    for tr in get_tournament_rounds(db, "league"):
+    by_round = {}
+    for m in db.execute("SELECT tournament_round_id, player1_id, player2_id FROM tournament_matchups").fetchall():
+        by_round.setdefault(m["tournament_round_id"], []).append(m)
+
+    for tr in rounds:
         if tr["skipped"]:
             # Rodada sem jogos: todos os jogadores ganham 3 pontos.
             for row in data.values():
                 row["points"] += 3
                 row["played"] += 1
             continue
-        if not tr["football_round_id"] or not round_is_finished(db, tr["football_round_id"]):
-            continue
-        finalize_tournament_round(db, tr["id"])
-        matches = db.execute(
-            "SELECT * FROM tournament_matchups WHERE tournament_round_id = ?", (tr["id"],)
-        ).fetchall()
-        for m in matches:
-            if not m["result"]:
+        for m in by_round.get(tr["id"], []):
+            out = matchup_outcome(scores, tr["id"], m["player1_id"], m["player2_id"])
+            if out is None:
                 continue
             p1, p2 = data.get(m["player1_id"]), data.get(m["player2_id"])
             if not p1 or not p2:
                 continue
             p1["played"] += 1
             p2["played"] += 1
-            p1["prediction_points"] += m["player1_score"] or 0
-            p2["prediction_points"] += m["player2_score"] or 0
-            if m["result"] == "P1":
+            p1["prediction_points"] += out["s1"]
+            p2["prediction_points"] += out["s2"]
+            if out["result"] == "P1":
                 p1["points"] += 3; p1["wins"] += 1; p2["losses"] += 1
-            elif m["result"] == "P2":
+            elif out["result"] == "P2":
                 p2["points"] += 3; p2["wins"] += 1; p1["losses"] += 1
             else:
                 p1["points"] += 1; p2["points"] += 1
@@ -537,47 +627,42 @@ def attach_football_round(db, football_round_id):
 
 
 def finalize_tournament_round(db, tournament_round_id):
-    tr = db.execute("SELECT * FROM tournament_rounds WHERE id = ?", (tournament_round_id,)).fetchone()
-    if not tr or not tr["football_round_id"] or not round_is_finished(db, tr["football_round_id"]):
-        return False
-    matches = db.execute("SELECT * FROM tournament_matchups WHERE tournament_round_id = ?", (tournament_round_id,)).fetchall()
-    for m in matches:
-        s1 = player_round_points(db, tr["football_round_id"], m["player1_id"])
-        s2 = player_round_points(db, tr["football_round_id"], m["player2_id"])
-        result = "P1" if s1 > s2 else ("P2" if s2 > s1 else "D")
-        db.execute(
-            "UPDATE tournament_matchups SET result = ?, player1_score = ?, player2_score = ? WHERE id = ?",
-            (result, s1, s2, m["id"]),
-        )
-    db.commit()
+    """Mantida por compatibilidade: os resultados dos confrontos agora são
+    calculados ao vivo a partir dos palpites, então não há nada a gravar."""
     return True
 
 
-def playoff_series(db):
+def playoff_series(db, scores=None):
     rounds = get_tournament_rounds(db, "playoff")
     if not rounds:
         return []
-    first_matches = db.execute(
+    if scores is None:
+        scores = tournament_scores(db)
+    ids = [tr["id"] for tr in rounds]
+    marks = ",".join("?" * len(ids))
+    rows = db.execute(
         "SELECT tm.*, p1.name AS p1_name, p2.name AS p2_name FROM tournament_matchups tm "
         "JOIN players p1 ON p1.id=tm.player1_id JOIN players p2 ON p2.id=tm.player2_id "
-        "WHERE tm.tournament_round_id=?", (rounds[0]["id"],)
+        f"WHERE tm.tournament_round_id IN ({marks})", ids
     ).fetchall()
+    by_round = {}
+    for r in rows:
+        by_round.setdefault(r["tournament_round_id"], []).append(r)
     result = []
-    for base in first_matches:
+    for base in by_round.get(rounds[0]["id"], []):
         games = []
         completed_games = 0
         p1_wins = p2_wins = 0
         for tr in rounds:
-            m = db.execute(
-                "SELECT * FROM tournament_matchups WHERE tournament_round_id=? AND player1_id=? AND player2_id=?",
-                (tr["id"], base["player1_id"], base["player2_id"]),
-            ).fetchone()
+            m = next((x for x in by_round.get(tr["id"], [])
+                      if x["player1_id"] == base["player1_id"] and x["player2_id"] == base["player2_id"]), None)
             if m:
                 games.append(m)
-                if m["result"]:
+                out = matchup_outcome(scores, tr["id"], m["player1_id"], m["player2_id"])
+                if out:
                     completed_games += 1
-                    if m["result"] == "P1": p1_wins += 1
-                    elif m["result"] == "P2": p2_wins += 1
+                    if out["result"] == "P1": p1_wins += 1
+                    elif out["result"] == "P2": p2_wins += 1
         winner_id = None
         if completed_games == 4:
             if p1_wins > p2_wins:
@@ -595,15 +680,16 @@ def playoff_series(db):
     return result
 
 
-def share_round_options(db):
+def share_round_options(db, scores=None):
     """Rodadas da liga que podem aparecer no texto de compartilhar (sorteadas ou sem jogos)."""
+    if scores is None:
+        scores = tournament_scores(db)
     drawn = {r["rid"] for r in db.execute(
         "SELECT DISTINCT tournament_round_id AS rid FROM tournament_matchups").fetchall()}
     options = []
     for tr in get_tournament_rounds(db, "league"):
         if tr["skipped"] or tr["id"] in drawn:
-            finished = bool(tr["skipped"]) or (
-                bool(tr["football_round_id"]) and round_is_finished(db, tr["football_round_id"]))
+            finished = bool(tr["skipped"]) or bool(scores.get(tr["id"], {}).get("finished"))
             options.append({"number": tr["number"], "finished": finished, "skipped": bool(tr["skipped"])})
     return options
 
@@ -614,10 +700,13 @@ def default_share_round(options):
     return max(done) if done else None
 
 
-def build_ranking_text(db, round_number=None):
+def build_ranking_text(db, round_number=None, ranking=None, scores=None):
     """Texto para colar no WhatsApp: classificação + confrontos de UMA rodada, com os resultados."""
-    ranking = league_standings(db)  # também atualiza os placares dos confrontos já encerrados
-    options = share_round_options(db)
+    if scores is None:
+        scores = tournament_scores(db)
+    if ranking is None:
+        ranking = league_standings(db, scores)
+    options = share_round_options(db, scores)
     if round_number not in {o["number"] for o in options}:
         round_number = default_share_round(options)
     lines = ["CLASSIFICAÇÃO - FASE DE LIGA"]
@@ -625,47 +714,35 @@ def build_ranking_text(db, round_number=None):
         lines.append(f"{i}. {row['player']['name']}: {row['points']} pts")
 
     all_names = {p["id"]: p["name"] for p in db.execute("SELECT id, name FROM players").fetchall()}
-    rounds = [tr for tr in get_tournament_rounds(db, "league") if tr["number"] == round_number]
-    matchups = db.execute(
-        "SELECT tm.tournament_round_id AS rid, tm.player1_id AS p1, tm.player2_id AS p2, "
-        "tm.result AS result, tm.player1_score AS s1, tm.player2_score AS s2 "
-        "FROM tournament_matchups tm JOIN tournament_rounds tr ON tr.id = tm.tournament_round_id "
-        "WHERE tr.phase = 'league'"
-    ).fetchall()
-    by_round = {}
-    for m in matchups:
-        by_round.setdefault(m["rid"], []).append(m)
-
-    blocks = []
-    for tr in rounds:
-        if tr["skipped"]:
-            blocks.append([f"Rodada {tr['number']}: sem jogos (todos ganharam 3 pts)"])
-            continue
-        ms = by_round.get(tr["id"])
-        if not ms:
-            continue  # rodada ainda não sorteada
-        finished = bool(tr["football_round_id"]) and round_is_finished(db, tr["football_round_id"])
-        block = [f"Rodada {tr['number']}" + ("" if finished else " (aguardando resultados)")]
-        playing = set()
-        for m in sorted(ms, key=lambda x: all_names.get(x["p1"], "").lower()):
-            n1, n2 = all_names.get(m["p1"], "?"), all_names.get(m["p2"], "?")
-            playing.update((m["p1"], m["p2"]))
-            if finished and m["result"]:
-                block.append(f"{n1} {m['s1']} x {m['s2']} {n2}")
-            else:
-                block.append(f"{n1} x {n2}")
-        resting = sorted(all_names[pid] for pid in all_names if pid not in playing)
-        if resting:
-            block.append("Folga: " + ", ".join(resting))
-        blocks.append(block)
-    if blocks:
+    chosen = next((tr for tr in get_tournament_rounds(db, "league") if tr["number"] == round_number), None)
+    block = None
+    if chosen is not None:
+        if chosen["skipped"]:
+            block = [f"Rodada {chosen['number']}: sem jogos (todos ganharam 3 pts)"]
+        else:
+            ms = db.execute(
+                "SELECT player1_id AS p1, player2_id AS p2 FROM tournament_matchups WHERE tournament_round_id = ?",
+                (chosen["id"],),
+            ).fetchall()
+            if ms:
+                finished = bool(scores.get(chosen["id"], {}).get("finished"))
+                block = [f"Rodada {chosen['number']}" + ("" if finished else " (aguardando resultados)")]
+                playing = set()
+                for m in sorted(ms, key=lambda x: all_names.get(x["p1"], "").lower()):
+                    n1, n2 = all_names.get(m["p1"], "?"), all_names.get(m["p2"], "?")
+                    playing.update((m["p1"], m["p2"]))
+                    out = matchup_outcome(scores, chosen["id"], m["p1"], m["p2"])
+                    block.append(f"{n1} {out['s1']} x {out['s2']} {n2}" if out else f"{n1} x {n2}")
+                resting = sorted(all_names[pid] for pid in all_names if pid not in playing)
+                if resting:
+                    block.append("Folga: " + ", ".join(resting))
+    if block:
         lines.append("")
         lines.append("CONFRONTOS")
-        for block in blocks:
-            lines.append("")
-            lines.extend(block)
+        lines.append("")
+        lines.extend(block)
 
-    series = playoff_series(db)
+    series = playoff_series(db, scores)
     if series:
         lines.append("")
         lines.append("PLAYOFF (melhor de 4 jogos)")
@@ -746,20 +823,31 @@ def teams_match(api_name, our_name):
     return bool(a and b and (a == b or a in b or b in a))
 
 
-def fetch_results_from_football_data(matches):
+_API_CACHE = {"time": 0.0, "matches": None}
+API_CACHE_SECONDS = 60
+
+
+def fetch_results_from_football_data(matches, fresh=False):
+    """Consulta a football-data.org. A resposta fica 60 s em memória para não
+    repetir a chamada a cada palpite colado (o plano gratuito tem limite)."""
     if not FOOTBALL_DATA_TOKEN:
         raise RuntimeError(
             "A variável de ambiente FOOTBALL_DATA_TOKEN não está configurada "
             f"para consultar a {COMPETITION_NAME}."
         )
-    resp = requests.get(
-        f"https://api.football-data.org/v4/competitions/{COMPETITION_CODE}/matches",
-        headers={"X-Auth-Token": FOOTBALL_DATA_TOKEN}, timeout=20,
-    )
-    data = resp.json()
-    if resp.status_code != 200:
-        raise RuntimeError(f"A football-data.org retornou um erro: {data.get('message', data)}")
-    api_matches = data.get("matches", [])
+    now = time.time()
+    if not fresh and _API_CACHE["matches"] is not None and now - _API_CACHE["time"] < API_CACHE_SECONDS:
+        api_matches = _API_CACHE["matches"]
+    else:
+        resp = requests.get(
+            f"https://api.football-data.org/v4/competitions/{COMPETITION_CODE}/matches",
+            headers={"X-Auth-Token": FOOTBALL_DATA_TOKEN}, timeout=10,
+        )
+        data = resp.json()
+        if resp.status_code != 200:
+            raise RuntimeError(f"A football-data.org retornou um erro: {data.get('message', data)}")
+        api_matches = data.get("matches", [])
+        _API_CACHE["time"], _API_CACHE["matches"] = now, api_matches
     results = []
     for m in matches:
         found = next((fx for fx in api_matches if teams_match(fx["homeTeam"]["name"], m["home"]) and teams_match(fx["awayTeam"]["name"], m["away"])), None)
@@ -770,9 +858,18 @@ def fetch_results_from_football_data(matches):
     return results
 
 
-def apply_results_to_round(db, round_id):
+def apply_results_to_round(db, round_id, only_missing=False, fresh=False):
+    """Busca os resultados e grava nos jogos.
+
+    only_missing=True: só consulta a API se algum jogo ainda estiver sem resultado
+    (usado ao salvar palpites, para não chamar a API à toa).
+    """
     matches = db.execute("SELECT * FROM matches WHERE round_id=? ORDER BY position", (round_id,)).fetchall()
-    results = fetch_results_from_football_data([{"home": m["home"], "away": m["away"]} for m in matches])
+    if only_missing and not any(
+        m["home_goals"] is None or m["away_goals"] is None for m in matches if not m["manual"]
+    ):
+        return 0, 0
+    results = fetch_results_from_football_data([{"home": m["home"], "away": m["away"]} for m in matches], fresh=fresh)
     updated = 0
     for m, r in zip(matches, results):
         if m["manual"]:
@@ -784,20 +881,18 @@ def apply_results_to_round(db, round_id):
     return updated, len(matches) - updated
 
 
-def get_reference_round(db):
-    rows = db.execute("SELECT * FROM rounds ORDER BY created_at DESC").fetchall()
-    return next((r for r in rows if round_is_finished(db, r["id"])), None)
-
-
 @app.context_processor
 def inject_header_stats():
     db = get_db()
-    league = get_tournament_rounds(db, "league")
-    filled = sum(1 for r in league if r["football_round_id"] or r["skipped"])
-    finished = sum(
-        1 for r in league
-        if r["skipped"] or (r["football_round_id"] and round_is_finished(db, r["football_round_id"]))
-    )
+    rows = db.execute(
+        "SELECT tr.skipped AS skipped, tr.football_round_id AS fid, "
+        "(SELECT COUNT(*) FROM matches m WHERE m.round_id = tr.football_round_id) AS total, "
+        "(SELECT COUNT(*) FROM matches m WHERE m.round_id = tr.football_round_id "
+        " AND m.home_goals IS NOT NULL AND m.away_goals IS NOT NULL) AS done "
+        "FROM tournament_rounds tr WHERE tr.phase = 'league'"
+    ).fetchall()
+    filled = sum(1 for r in rows if r["fid"] or r["skipped"])
+    finished = sum(1 for r in rows if r["skipped"] or (r["fid"] and r["total"] > 0 and r["total"] == r["done"]))
     return {"rounds_count": filled, "open_rounds": filled - finished, "league_finished": finished >= 8}
 
 
@@ -809,18 +904,20 @@ def index():
 @app.route("/classificacao")
 def ranking():
     db = get_db()
-    rows = league_standings(db)
-    ref = get_reference_round(db)
-    share_rounds = share_round_options(db)
+    scores = tournament_scores(db)
+    rows = league_standings(db, scores)
+    share_rounds = share_round_options(db, scores)
     requested = request.args.get("rodada", type=int)
     copy_round = requested if requested in {o["number"] for o in share_rounds} else default_share_round(share_rounds)
-    copy_text = build_ranking_text(db, copy_round) if rows else ""
-    playoff_rows = playoff_series(db)
+    copy_text = build_ranking_text(db, copy_round, rows, scores) if rows else ""
+    playoff_rows = playoff_series(db, scores)
+    league_round_count = sum(
+        1 for r in get_tournament_rounds(db, "league") if r["football_round_id"] or r["skipped"]
+    )
     return render_template("ranking.html", ranking=rows, copy_text=copy_text, active="ranking",
                            share_rounds=share_rounds, copy_round=copy_round,
-                           league_round_count=sum(1 for r in get_tournament_rounds(db, "league") if r["football_round_id"] or r["skipped"]),
-                           playoff_pairs=rows[4:12] if len(rows) >= 12 else [], playoff_series=playoff_rows,
-                           ref_round=ref)
+                           league_round_count=league_round_count,
+                           playoff_pairs=rows[4:12] if len(rows) >= 12 else [], playoff_series=playoff_rows)
 
 
 SORTEIO_MENSAGENS = {
@@ -837,18 +934,44 @@ SORTEIO_MENSAGENS = {
 @app.route("/rodadas")
 def rodadas():
     db = get_db()
+    create_full_league_schedule(db)
     players = db.execute("SELECT * FROM players ORDER BY name").fetchall()
     rounds_rows = db.execute("SELECT * FROM rounds ORDER BY created_at DESC").fetchall()
+    trs_all = get_tournament_rounds(db)
+    tr_by_football = {t["football_round_id"]: t for t in trs_all if t["football_round_id"]}
+
+    # Carrega tudo de uma vez (poucas consultas), em vez de uma por rodada/jogador.
+    matches_all, picks_all, no_shows_all = [], [], []
+    if rounds_rows:
+        marks = ",".join("?" * len(rounds_rows))
+        rids = [r["id"] for r in rounds_rows]
+        matches_all = db.execute(
+            f"SELECT * FROM matches WHERE round_id IN ({marks}) ORDER BY position", rids).fetchall()
+        picks_all = db.execute(
+            f"SELECT round_id, player_id, match_id, home_guess, away_guess FROM picks WHERE round_id IN ({marks})",
+            rids).fetchall()
+        no_shows_all = db.execute(
+            f"SELECT round_id, player_id FROM round_no_shows WHERE round_id IN ({marks})", rids).fetchall()
+    matches_by, picks_by, shows_by = {}, {}, {}
+    for m in matches_all:
+        matches_by.setdefault(m["round_id"], []).append(m)
+    for pk in picks_all:
+        picks_by.setdefault(pk["round_id"], []).append(pk)
+    for ns in no_shows_all:
+        shows_by.setdefault(ns["round_id"], set()).add(ns["player_id"])
+    scores = compute_scores(trs_all, matches_all, picks_all)
+
     rounds = []
     for r in rounds_rows:
-        matches = db.execute("SELECT * FROM matches WHERE round_id=? ORDER BY position", (r["id"],)).fetchall()
-        finished = round_is_finished(db, r["id"])
-        scored, absent, pending = round_scoreboard(db, r["id"], matches, players)
+        matches = matches_by.get(r["id"], [])
         with_result = sum(1 for m in matches if m["home_goals"] is not None and m["away_goals"] is not None)
-        tr = db.execute("SELECT * FROM tournament_rounds WHERE football_round_id=?", (r["id"],)).fetchone()
+        finished = bool(matches) and with_result == len(matches)
+        scored, absent, pending = round_scoreboard(
+            matches, picks_by.get(r["id"], []), shows_by.get(r["id"], set()), players)
         rounds.append({"id": r["id"], "name": r["name"], "matches": matches, "finished": finished,
                        "scored": scored, "absent": absent, "pending": pending,
-                       "total_matches": len(matches), "with_result": with_result, "tournament": tr})
+                       "total_matches": len(matches), "with_result": with_result,
+                       "tournament": tr_by_football.get(r["id"])})
 
     # Aviso logo após salvar um palpite: mostra os pontos que o jogador fez.
     saved = None
@@ -860,10 +983,9 @@ def rodadas():
             saved = {"name": entry["name"], "round": rd["name"], "pts": entry["pts"], "count": entry["count"],
                      "total": rd["total_matches"], "with_result": rd["with_result"]}
 
-    create_full_league_schedule(db)
-    league_trs = get_tournament_rounds(db, "league")
-    playoff_trs = get_tournament_rounds(db, "playoff")
-    standings = league_standings(db)
+    league_trs = [t for t in trs_all if t["phase"] == "league"]
+    playoff_trs = [t for t in trs_all if t["phase"] == "playoff"]
+
     # Resumo logo após salvar resultados à mão.
     resultados = None
     rr = request.args.get("resultados")
@@ -883,16 +1005,23 @@ def rodadas():
     if code in SORTEIO_MENSAGENS:
         sorteio_ok, text = SORTEIO_MENSAGENS[code]
         sorteio_msg = text.format(n=n if n else "")
-    matchup_map = {}
-    for tr in league_trs + playoff_trs:
-        matchup_map[tr["id"]] = db.execute(
-            "SELECT tm.*, p1.name AS p1_name, p2.name AS p2_name FROM tournament_matchups tm "
-            "JOIN players p1 ON p1.id=tm.player1_id JOIN players p2 ON p2.id=tm.player2_id "
-            "WHERE tm.tournament_round_id=?", (tr["id"],)
-        ).fetchall()
+
+    matchup_map = {t["id"]: [] for t in trs_all}
+    for m in db.execute(
+        "SELECT tm.*, p1.name AS p1_name, p2.name AS p2_name FROM tournament_matchups tm "
+        "JOIN players p1 ON p1.id=tm.player1_id JOIN players p2 ON p2.id=tm.player2_id"
+    ).fetchall():
+        d = dict(m)
+        out = matchup_outcome(scores, m["tournament_round_id"], m["player1_id"], m["player2_id"])
+        d["result"] = out["result"] if out else None
+        d["player1_score"] = out["s1"] if out else None
+        d["player2_score"] = out["s2"] if out else None
+        matchup_map.setdefault(m["tournament_round_id"], []).append(d)
+    for lst in matchup_map.values():
+        lst.sort(key=lambda x: x["p1_name"].lower())
     return render_template("rodadas.html", players=players, rounds=rounds, active="rodadas",
                            tournament_rounds=league_trs, playoff_rounds=playoff_trs,
-                           matchup_map=matchup_map, standings=standings, playoff_series=playoff_series(db),
+                           matchup_map=matchup_map, playoff_series=playoff_series(db, scores),
                            sorteio_msg=sorteio_msg, sorteio_ok=sorteio_ok, saved=saved,
                            resultados=resultados, not_found_games=not_found_games)
 
@@ -930,7 +1059,7 @@ def salvar_palpite():
         if (normalize_name(pm["home"]), normalize_name(pm["away"])) not in known
     ][:10]
     try:
-        apply_results_to_round(db, round_row["id"])
+        apply_results_to_round(db, round_row["id"], only_missing=True)
     except Exception:
         pass
     finalize_tournament_round(db, tr["id"])
@@ -974,7 +1103,7 @@ def sortear_rodada(tournament_round_id):
 def finalizar_rodada(round_id):
     db = get_db()
     try:
-        apply_results_to_round(db, round_id)
+        apply_results_to_round(db, round_id, fresh=True)
     except Exception:
         pass
     tr = db.execute("SELECT * FROM tournament_rounds WHERE football_round_id=?", (round_id,)).fetchone()
