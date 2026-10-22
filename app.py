@@ -84,7 +84,8 @@ class DB:
 
 
 _pool = None
-_PG_KWARGS = {"connect_timeout": 15, "prepare_threshold": None}
+# 5 s é suficiente: banco fora do ar precisa falhar rápido, não travar o site.
+_PG_KWARGS = {"connect_timeout": 5, "prepare_threshold": None}
 
 
 def _get_pool():
@@ -97,6 +98,7 @@ def _get_pool():
             return None  # sem o pacote, cai na conexão simples
         _pool = ConnectionPool(
             DATABASE_URL, min_size=1, max_size=5, open=True,
+            timeout=5,  # espera no máximo 5 s por uma conexão livre
             check=ConnectionPool.check_connection,
             kwargs=dict(_PG_KWARGS, row_factory=_pg_row_factory),
         )
@@ -236,6 +238,55 @@ def init_db():
         db.commit()
     finally:
         db.close()
+
+
+_db_ready = False
+_db_last_try = 0.0
+
+
+def ensure_db(force=False):
+    """Inicializa o banco quando ele estiver acessível.
+
+    Antes o init_db() rodava direto na importação do módulo: com o banco fora do
+    ar o processo travava e o gunicorn não subia, então o Render segurava cada
+    requisição por 40-100 s antes de responder. Agora a falha é registrada e
+    nova tentativa acontece em uma requisição seguinte (com intervalo mínimo).
+    """
+    global _db_ready, _db_last_try
+    if _db_ready and not force:
+        return True
+    if not force and time.time() - _db_last_try < 15:
+        return False
+    _db_last_try = time.time()
+    try:
+        init_db()
+        _db_ready = True
+        return True
+    except Exception:
+        app.logger.exception("Banco de dados indisponível")
+        return False
+
+
+_DB_DOWN_PAGE = """<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bolão — banco indisponível</title></head>
+<body style="font-family:system-ui,sans-serif;background:#0F0F42;color:#F1F1F8;
+padding:40px 20px;text-align:center">
+<h1 style="font-size:20px">Banco de dados indisponível</h1>
+<p style="color:#B7B9DA;font-size:14px;line-height:1.5">
+O site está no ar, mas não conseguiu falar com o banco (Neon/Postgres).<br>
+Isso costuma ser cota do plano grátis estourada ou uma instância hibernando.</p>
+</body></html>"""
+
+
+@app.before_request
+def _check_db():
+    if request.endpoint in ("healthz", "static"):
+        return None
+    if not _db_ready and not ensure_db():
+        return _DB_DOWN_PAGE, 503, {"Retry-After": "30"}
+    return None
 
 
 _TRANSLIT = str.maketrans({"ø": "o", "æ": "ae", "œ": "oe", "ß": "ss", "ł": "l", "đ": "d", "ð": "d", "ı": "i"})
@@ -1029,13 +1080,37 @@ def healthz():
     """Ping leve usado por serviços de keep-alive (cron-job.org, UptimeRobot...).
 
     Consulta o banco de propósito: assim o Postgres do Neon também não hiberna.
+    Responde rápido mesmo com o banco fora (timeout de 5 s) e informa o status.
     """
+    started = time.perf_counter()
+    error = None
     try:
         get_db().execute("SELECT 1").fetchone()
         db_ok = True
-    except Exception:
+    except Exception as exc:
         db_ok = False
-    resp = jsonify(status="ok", db=db_ok)
+        error = type(exc).__name__
+        app.logger.exception("Banco de dados indisponível")
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    resp = jsonify(status="ok", db=db_ok, db_ms=elapsed_ms, error=error)
+
+    # ?detail=1 testa a conexão direta e devolve o erro exato do driver.
+    # (o pool esconde a causa; isso mostra: timeout, DNS, opção inválida...)
+    if not db_ok and request.args.get("detail") == "1":
+        detail = None
+        if DATABASE_URL:
+            try:
+                import psycopg
+
+                conn = psycopg.connect(DATABASE_URL, connect_timeout=5)
+                conn.close()
+                detail = "conexao direta ok (o problema esta no pool)"
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {str(exc).splitlines()[0][:200]}"
+        else:
+            detail = "DATABASE_URL nao configurada"
+        resp = jsonify(status="ok", db=db_ok, db_ms=elapsed_ms, error=error, detail=detail)
+
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -1480,7 +1555,7 @@ def reset_players():
 
 
 if __name__ == "__main__":
-    init_db()
+    ensure_db(force=True)
     app.run(debug=True, port=5000)
 else:
-    init_db()
+    ensure_db(force=True)

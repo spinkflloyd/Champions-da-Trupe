@@ -1,18 +1,22 @@
-/* Service worker do Bolão da Champions.
- *
- * Objetivo: o app abre na hora, mesmo quando o servidor está "dormindo"
- * (plano free do Render) ou quando o celular está sem internet.
+/* Service worker do Bolão da Champions — v4
  *
  * Regras:
- *  - Navegação (abrir uma página): tenta a rede por até 3,5 s; se não vier,
- *    mostra a última versão em cache; se não houver, mostra a tela offline.
- *  - Arquivos de /static/: mostra o cache na hora e atualiza em segundo plano.
- *  - POST (salvar palpite etc.) nunca é interceptado.
+ *  - Navegação com cache disponível: espera 6 s pela rede; se não vier, mostra
+ *    a última versão em cache (abre na hora).
+ *  - Navegação sem cache: espera até 25 s (tempo de um servidor free acordar).
+ *  - Se o servidor responder 5xx, mostra a tela de diagnóstico em vez de
+ *    fingir que está "conectando" (isso causava um loop infinito).
+ *  - /static/: cache na hora + atualização em segundo plano.
+ *  - POST nunca é interceptado.
+ *  - ?nosw=1 desliga o service worker (modo diagnóstico).
  */
 
-const VERSION = "bolao-v3";
+const VERSION = "bolao-v4";
 const OFFLINE_URL = "/static/offline.html";
-const NETWORK_TIMEOUT = 3500;
+const TIMEOUT_CACHED = 6000;
+// 12 s: se o servidor estiver hibernando, o usuário vê a tela de progresso
+// rápido (em vez de uma tela branca) e o app abre sozinho quando ele acordar.
+const TIMEOUT_UNCACHED = 12000;
 
 const SHELL = [
   "/static/style.css",
@@ -50,42 +54,41 @@ self.addEventListener("message", (event) => {
   if (event.data === "skip-waiting") self.skipWaiting();
 });
 
-function withTimeout(promise, ms) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      }
-    );
+function fallback(status, text) {
+  return new Response(text, {
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
 }
 
-async function networkFirst(request) {
+async function navigate(request) {
   const cache = await caches.open(VERSION);
-  try {
-    const response = await withTimeout(fetch(request), NETWORK_TIMEOUT);
-    // 5xx = servidor acordando ou fora do ar: vale mais a última versão em cache.
-    if (response && response.status < 500) {
-      if (response.ok) cache.put(request, response.clone());
-      return response;
-    }
-  } catch (error) {
-    // sem conexão / tempo esgotado: cai no cache abaixo
-  }
   const cached = await cache.match(request);
-  if (cached) return cached;
-  const offline = await cache.match(OFFLINE_URL);
-  if (offline) return offline;
-  return new Response("Sem conexão com o servidor.", {
-    status: 503,
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
-  });
+  const timeout = cached ? TIMEOUT_CACHED : TIMEOUT_UNCACHED;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(request, { signal: controller.signal });
+    clearTimeout(timer);
+
+    if (response.status >= 500) {
+      // O servidor respondeu, mas com erro: não adianta recarregar em loop.
+      // A página offline detecta o status pelo próprio health check/preflight.
+      const offline = await cache.match(OFFLINE_URL);
+      if (offline) return offline;
+      return fallback(503, "O servidor respondeu com erro " + response.status + ".");
+    }
+
+    if (response.ok) cache.put(request, response.clone());
+    return response;
+  } catch (error) {
+    clearTimeout(timer);
+    if (cached) return cached;
+    const offline = await cache.match(OFFLINE_URL);
+    return offline || fallback(503, "Sem conexão com o servidor.");
+  }
 }
 
 async function staleWhileRevalidate(request) {
@@ -111,9 +114,10 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return; // fontes do Google etc.
   if (url.pathname === "/sw.js") return;
+  if (url.searchParams.get("nosw") === "1") return; // modo diagnóstico
 
   if (request.mode === "navigate") {
-    event.respondWith(networkFirst(request));
+    event.respondWith(navigate(request));
     return;
   }
 

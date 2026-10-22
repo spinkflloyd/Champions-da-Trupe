@@ -13,6 +13,8 @@
     --chalk:#F1F1F8;
     --chalk-dim:#B7B9DA;
     --floodlight:#FFC94D;
+    --red:#E4572E;
+    --amber:#F2A33C;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;min-height:100%;}
@@ -37,12 +39,15 @@
     text-align:center;
     box-shadow:0 18px 40px rgba(0,0,0,0.35);
   }
+  .box.erro{ border-top-color:var(--red); }
+  .box.banco{ border-top-color:var(--amber); }
   .ball{
     font-size:44px;
     line-height:1;
     display:inline-block;
     animation:bounce 1.4s ease-in-out infinite;
   }
+  .box.erro .ball, .box.banco .ball{ animation:none; }
   @keyframes bounce{
     0%,100%{transform:translateY(0) rotate(0deg);}
     50%{transform:translateY(-10px) rotate(-12deg);}
@@ -73,6 +78,8 @@
     background:var(--floodlight);
     animation:slide 1.6s ease-in-out infinite;
   }
+  .box.erro .bar span{ animation:none; width:100%; background:var(--red); opacity:0.7; }
+  .box.banco .bar span{ animation:none; width:100%; background:var(--amber); opacity:0.7; }
   @keyframes slide{
     0%{transform:translateX(-100%);}
     100%{transform:translateX(300%);}
@@ -90,11 +97,27 @@
     width:100%;
   }
   button:active{transform:scale(0.98);}
+  button.sec{
+    background:transparent;
+    color:var(--chalk-dim);
+    border:1px solid rgba(241,241,248,0.2);
+    margin-top:10px;
+    font-weight:500;
+    font-size:13px;
+  }
   .hint{
     font-size:12px;
     color:var(--chalk-dim);
     opacity:0.75;
     margin:14px 0 0;
+  }
+  .status{
+    font-family:'Roboto Mono',ui-monospace,monospace;
+    font-size:11px;
+    color:var(--chalk-dim);
+    opacity:0.6;
+    margin:14px 0 0;
+    word-break:break-all;
   }
   @media (prefers-reduced-motion: reduce){
     .ball{animation:none;}
@@ -103,64 +126,172 @@
 </style>
 </head>
 <body>
-  <div class="box">
-    <div class="ball">⚽</div>
+  <div class="box" id="box">
+    <div class="ball" id="ball">⚽</div>
     <h1 id="title">Conectando ao servidor…</h1>
     <p id="msg">O servidor grátis hiberna quando ninguém acessa. Assim que ele acordar, o app abre sozinho.</p>
     <div class="bar"><span></span></div>
     <button id="retry" type="button">Tentar agora</button>
-    <p class="hint">Se estiver sem internet, o app volta assim que a conexão retornar.</p>
+    <button id="no-cache" class="sec" type="button">Abrir sem cache</button>
+    <p class="hint" id="hint">Se estiver sem internet, o app volta assim que a conexão retornar.</p>
+    <p class="status" id="status"></p>
   </div>
 
 <script>
   (function () {
+    var box = document.getElementById('box');
     var title = document.getElementById('title');
     var msg = document.getElementById('msg');
+    var hint = document.getElementById('hint');
+    var status = document.getElementById('status');
     var retry = document.getElementById('retry');
-    var attempts = 0;
-    var target = location.pathname + location.search + location.hash;
+    var noCache = document.getElementById('no-cache');
+
+    var HEALTH_TIMEOUT = 8000;   // o /healthz tem que responder rápido
+    var PAGE_TIMEOUT = 20000;    // a página pode ser mais lenta
+    var COUNT_KEY = 'bolao-tentativas';
+
+    var tries = 0;
     var timer = null;
+    var startedAt = Date.now();
+    var ticks = 0;
+
+    // URL que o usuário pediu (o service worker entregou esta tela no lugar dela).
+    var target = location.pathname + location.search + location.hash;
+    if (target.indexOf('/static/offline.html') === 0) target = '/classificacao';
+
+    function fetchWithTimeout(url, ms, options) {
+      var controller = new AbortController();
+      var timerId = setTimeout(function () { controller.abort(); }, ms);
+      var opts = Object.assign({}, options || {}, { signal: controller.signal });
+      return fetch(url, opts).finally(function () { clearTimeout(timerId); });
+    }
+
+    function paint(state, detail) {
+      box.className = 'box' + (state === 'erro' ? ' erro' : state === 'banco' ? ' banco' : '');
+      if (state === 'conectando') {
+        title.textContent = 'Conectando ao servidor…';
+        msg.textContent = 'O servidor grátis hiberna quando ninguém acessa. Assim que ele acordar, o app abre sozinho.';
+        hint.textContent = 'Se estiver sem internet, o app volta assim que a conexão retornar.';
+      } else if (state === 'lento') {
+        title.textContent = 'Servidor acordando…';
+        msg.textContent = 'Está demorando mais que o normal, mas o servidor respondeu. Tentando de novo.';
+        hint.textContent = 'Servidor grátis pode levar até 1 minuto para iniciar.';
+      } else if (state === 'offline') {
+        title.textContent = 'Servidor não respondeu';
+        msg.textContent = 'O celular tem internet, mas o servidor não respondeu a tempo. Pode estar iniciando ou fora do ar.';
+        hint.textContent = 'O app tenta de novo sozinho.';
+      } else if (state === 'banco') {
+        title.textContent = 'Banco de dados fora do ar';
+        msg.textContent = 'O site está no ar, mas não conseguiu falar com o banco (Neon/Postgres). A classificação não pode ser carregada agora.';
+        hint.textContent = 'Quase sempre é cota do plano grátis do Neon ou instância hibernando.';
+      } else if (state === 'pronto') {
+        title.textContent = 'Pronto! Abrindo…';
+        msg.textContent = 'O servidor respondeu. Carregando o app.';
+        hint.textContent = '';
+      } else if (state === 'erro') {
+        title.textContent = 'O servidor respondeu com erro';
+        msg.textContent = 'O app está no ar, mas esta página falhou ao carregar. Normalmente é um erro no código ou no banco de dados — não é falta de internet.';
+        hint.textContent = 'Veja os logs no painel do Render para saber o motivo exato.';
+      }
+      status.textContent = detail || ('aguardando ' + Math.round((Date.now() - startedAt) / 1000) + 's');
+    }
 
     function schedule(delay) {
       clearTimeout(timer);
-      timer = setTimeout(ping, delay);
+      timer = setTimeout(check, delay);
     }
 
-    async function ping() {
-      attempts++;
+    function openTarget() {
+      tries++;
+      try { sessionStorage.setItem(COUNT_KEY, String(tries)); } catch (e) {}
+      location.replace(target);
+    }
+
+    async function check() {
+      ticks++;
+
+      // 1) O servidor está de pé? E o banco?
+      var health = null;
+      var healthData = null;
       try {
-        var response = await fetch('/healthz', { cache: 'no-store' });
-        if (response.ok) {
-          title.textContent = 'Pronto! Abrindo…';
-          msg.textContent = 'O servidor respondeu. Carregando o app.';
-          location.replace(target);
+        health = await fetchWithTimeout('/healthz?_=' + Date.now(), HEALTH_TIMEOUT, { cache: 'no-store' });
+        healthData = await health.json().catch(function () { return null; });
+      } catch (e) {
+        health = null;
+      }
+
+      if (!health) {
+        paint('offline');
+        return schedule(4000);
+      }
+
+      if (healthData && healthData.db === false) {
+        paint('banco', 'banco: ' + (healthData.error || 'sem resposta') +
+              (healthData.db_ms ? ' · ' + healthData.db_ms + 'ms' : ''));
+        return schedule(10000);
+      }
+
+      if (!health.ok) {
+        paint('offline', 'healthz respondeu ' + health.status);
+        return schedule(4000);
+      }
+
+      // 2) A página pedida carrega? Só navega se carregar de verdade.
+      var page = null;
+      try {
+        page = await fetchWithTimeout(target, PAGE_TIMEOUT, { cache: 'no-store' });
+      } catch (e) {
+        page = null;
+      }
+
+      if (page && page.ok) {
+        try { sessionStorage.removeItem(COUNT_KEY); } catch (e) {}
+        paint('pronto');
+        if (tries >= 3) {
+          paint('erro');
+          title.textContent = 'Quase lá';
+          msg.textContent = 'O servidor respondeu agora. Toque em "Abrir o app" para carregar.';
+          retry.textContent = 'Abrir o app';
+          retry.onclick = openTarget;
           return;
         }
-      } catch (error) {
-        // ainda sem conexão: tenta de novo
-      }
-      if (attempts === 3) {
-        title.textContent = 'Ainda acordando…';
-        msg.textContent = 'Servidor grátis pode levar até 50 segundos para iniciar. Já já abre.';
-      }
-      if (attempts > 12) {
-        title.textContent = 'Sem resposta do servidor';
-        msg.textContent = 'Verifique se o site está no ar. O app tenta de novo a cada 30 segundos.';
-        schedule(30000);
+        openTarget();
         return;
       }
-      schedule(4000);
+
+      if (page && page.status >= 500) {
+        paint('erro', 'página respondeu ' + page.status);
+        retry.textContent = 'Tentar de novo';
+        return; // não recarrega sozinho: evita o loop
+      }
+
+      if (page && page.status >= 400) {
+        paint('erro', 'página respondeu ' + page.status);
+        return;
+      }
+
+      paint('lento');
+      schedule(3000);
     }
 
     retry.addEventListener('click', function () {
-      retry.disabled = true;
-      retry.textContent = 'Tentando…';
-      attempts = 0;
+      tries = 0;
+      startedAt = Date.now();
+      try { sessionStorage.removeItem(COUNT_KEY); } catch (e) {}
+      retry.onclick = null;
+      retry.textContent = 'Tentar novamente';
+      paint('conectando');
       schedule(0);
     });
 
+    noCache.addEventListener('click', function () {
+      var sep = target.indexOf('?') === -1 ? '?' : '&';
+      location.replace(target + sep + 'nosw=1');
+    });
+
     window.addEventListener('online', function () { schedule(0); });
-    ping();
+    check();
   })();
 </script>
 </body>

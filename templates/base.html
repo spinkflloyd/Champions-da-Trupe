@@ -94,6 +94,15 @@
     });
   }
 
+  // ?nosw=1 = modo diagnóstico: limpa o cache antigo e a página busca direto do servidor.
+  (function () {
+    var params = new URLSearchParams(location.search);
+    if (params.get('nosw') !== '1' || !('caches' in window)) return;
+    caches.keys().then(function (keys) {
+      keys.forEach(function (key) { caches.delete(key); });
+    });
+  })();
+
   // Botão de instalação (Android/Chrome/Edge). No iPhone use Compartilhar > Adicionar à Tela de Início.
   (function () {
     var promptEvent = null;
