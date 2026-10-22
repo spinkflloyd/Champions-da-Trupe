@@ -4,6 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Bolão — Champions League</title>
+
+<!-- PWA: permite instalar como app e abrir sem a barra do navegador -->
+<meta name="theme-color" content="#0F0F42">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bolão">
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+<link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
   /* Imagem da esquerda (fantasminha): circular e com borda */
@@ -15,6 +26,26 @@
     border: 3px solid var(--floodlight, #ffffff);
     box-sizing: border-box;
   }
+
+  /* Botão "Instalar app" (só aparece quando o navegador permite instalar) */
+  .install-app{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: calc(100% - 32px);
+    margin: 12px 16px 0;
+    padding: 11px 16px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--floodlight, #FFC94D);
+    color: var(--pitch-dark, #0F0F42);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .install-app[hidden]{ display: none; }
 </style>
 </head>
 <body>
@@ -46,9 +77,52 @@
     <a href="{{ url_for('jogadores') }}" class="{{ 'active' if active=='jogadores' else '' }}">Jogadores</a>
   </nav>
 
+  <button id="install-app" class="install-app" type="button" hidden>
+    <span aria-hidden="true">📲</span> Instalar app
+  </button>
+
   <main>
     {% block content %}{% endblock %}
   </main>
 </div>
+
+<script>
+  // Registra o service worker: deixa o app abrir na hora, mesmo com o servidor dormindo.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js').catch(function () {});
+    });
+  }
+
+  // Botão de instalação (Android/Chrome/Edge). No iPhone use Compartilhar > Adicionar à Tela de Início.
+  (function () {
+    var promptEvent = null;
+    var button = document.getElementById('install-app');
+    if (!button) return;
+
+    window.addEventListener('beforeinstallprompt', function (event) {
+      event.preventDefault();
+      promptEvent = event;
+      button.hidden = false;
+    });
+
+    button.addEventListener('click', function () {
+      if (!promptEvent) return;
+      promptEvent.prompt();
+      promptEvent.userChoice.then(function () {
+        promptEvent = null;
+        button.hidden = true;
+      });
+    });
+
+    window.addEventListener('appinstalled', function () {
+      promptEvent = null;
+      button.hidden = true;
+    });
+
+    // Já está instalado (aberto como app): não mostra o botão.
+    if (window.matchMedia('(display-mode: standalone)').matches) button.hidden = true;
+  })();
+</script>
 </body>
 </html>

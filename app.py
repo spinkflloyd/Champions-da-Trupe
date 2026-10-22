@@ -8,9 +8,15 @@ from datetime import datetime
 import random
 
 import requests
-from flask import Flask, g, redirect, render_template, request, url_for
+from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory, url_for
 
-app = Flask(__name__)
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_TEMPLATES_DIR = os.path.join(_BASE_DIR, "templates")
+if not os.path.isdir(_TEMPLATES_DIR):
+    # Layout antigo do projeto: os templates estavam em static/templates.
+    _TEMPLATES_DIR = os.path.join(_BASE_DIR, "static", "templates")
+
+app = Flask(__name__, template_folder=_TEMPLATES_DIR)
 
 # Com DATABASE_URL definida (Neon/PostgreSQL), o app usa Postgres.
 # Sem ela, usa o arquivo SQLite local (útil para testar no computador).
@@ -1016,6 +1022,40 @@ def inject_header_stats():
 @app.route("/")
 def index():
     return redirect(url_for("ranking"))
+
+
+@app.route("/healthz")
+def healthz():
+    """Ping leve usado por serviços de keep-alive (cron-job.org, UptimeRobot...).
+
+    Consulta o banco de propósito: assim o Postgres do Neon também não hiberna.
+    """
+    try:
+        get_db().execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    resp = jsonify(status="ok", db=db_ok)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    resp = send_from_directory(
+        app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json"
+    )
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/sw.js")
+def service_worker():
+    """O service worker precisa ficar na raiz do site para controlar todas as páginas."""
+    resp = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
+    resp.headers["Service-Worker-Allowed"] = "/"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/classificacao")

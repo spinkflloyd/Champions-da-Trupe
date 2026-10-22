@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0F0F42">
+<title>Bolão — conectando…</title>
+<style>
+  :root{
+    --pitch-dark:#0F0F42;
+    --stripe:#22228A;
+    --pitch-mid:#191970;
+    --chalk:#F1F1F8;
+    --chalk-dim:#B7B9DA;
+    --floodlight:#FFC94D;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;min-height:100%;}
+  body{
+    font-family:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    color:var(--chalk);
+    background:
+      repeating-linear-gradient(135deg, var(--pitch-mid) 0px, var(--pitch-mid) 40px, var(--stripe) 40px, var(--stripe) 80px);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+  }
+  .box{
+    width:100%;
+    max-width:380px;
+    background:var(--pitch-dark);
+    border:1px solid rgba(241,241,248,0.14);
+    border-top:4px solid var(--floodlight);
+    border-radius:14px;
+    padding:32px 24px;
+    text-align:center;
+    box-shadow:0 18px 40px rgba(0,0,0,0.35);
+  }
+  .ball{
+    font-size:44px;
+    line-height:1;
+    display:inline-block;
+    animation:bounce 1.4s ease-in-out infinite;
+  }
+  @keyframes bounce{
+    0%,100%{transform:translateY(0) rotate(0deg);}
+    50%{transform:translateY(-10px) rotate(-12deg);}
+  }
+  h1{
+    font-size:20px;
+    margin:18px 0 8px;
+    letter-spacing:0.02em;
+  }
+  p{
+    color:var(--chalk-dim);
+    font-size:14px;
+    line-height:1.5;
+    margin:0 0 18px;
+  }
+  .bar{
+    height:5px;
+    border-radius:99px;
+    background:rgba(241,241,248,0.12);
+    overflow:hidden;
+    margin-bottom:18px;
+  }
+  .bar span{
+    display:block;
+    height:100%;
+    width:35%;
+    border-radius:99px;
+    background:var(--floodlight);
+    animation:slide 1.6s ease-in-out infinite;
+  }
+  @keyframes slide{
+    0%{transform:translateX(-100%);}
+    100%{transform:translateX(300%);}
+  }
+  button{
+    font-family:inherit;
+    font-size:14px;
+    font-weight:600;
+    color:var(--pitch-dark);
+    background:var(--floodlight);
+    border:0;
+    border-radius:10px;
+    padding:12px 20px;
+    cursor:pointer;
+    width:100%;
+  }
+  button:active{transform:scale(0.98);}
+  .hint{
+    font-size:12px;
+    color:var(--chalk-dim);
+    opacity:0.75;
+    margin:14px 0 0;
+  }
+  @media (prefers-reduced-motion: reduce){
+    .ball{animation:none;}
+    .bar span{animation:none;width:100%;opacity:0.5;}
+  }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="ball">⚽</div>
+    <h1 id="title">Conectando ao servidor…</h1>
+    <p id="msg">O servidor grátis hiberna quando ninguém acessa. Assim que ele acordar, o app abre sozinho.</p>
+    <div class="bar"><span></span></div>
+    <button id="retry" type="button">Tentar agora</button>
+    <p class="hint">Se estiver sem internet, o app volta assim que a conexão retornar.</p>
+  </div>
+
+<script>
+  (function () {
+    var title = document.getElementById('title');
+    var msg = document.getElementById('msg');
+    var retry = document.getElementById('retry');
+    var attempts = 0;
+    var target = location.pathname + location.search + location.hash;
+    var timer = null;
+
+    function schedule(delay) {
+      clearTimeout(timer);
+      timer = setTimeout(ping, delay);
+    }
+
+    async function ping() {
+      attempts++;
+      try {
+        var response = await fetch('/healthz', { cache: 'no-store' });
+        if (response.ok) {
+          title.textContent = 'Pronto! Abrindo…';
+          msg.textContent = 'O servidor respondeu. Carregando o app.';
+          location.replace(target);
+          return;
+        }
+      } catch (error) {
+        // ainda sem conexão: tenta de novo
+      }
+      if (attempts === 3) {
+        title.textContent = 'Ainda acordando…';
+        msg.textContent = 'Servidor grátis pode levar até 50 segundos para iniciar. Já já abre.';
+      }
+      if (attempts > 12) {
+        title.textContent = 'Sem resposta do servidor';
+        msg.textContent = 'Verifique se o site está no ar. O app tenta de novo a cada 30 segundos.';
+        schedule(30000);
+        return;
+      }
+      schedule(4000);
+    }
+
+    retry.addEventListener('click', function () {
+      retry.disabled = true;
+      retry.textContent = 'Tentando…';
+      attempts = 0;
+      schedule(0);
+    });
+
+    window.addEventListener('online', function () { schedule(0); });
+    ping();
+  })();
+</script>
+</body>
+</html>
